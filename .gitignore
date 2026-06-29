@@ -1,0 +1,29 @@
+# macOS
+.DS_Store
+
+# Go coverage and test outputs
+*.coverprofile
+coverage.out
+*.test
+
+# Local build outputs
+/bin/
+/dist/
+/tasker
+/*.exe
+/*.out
+
+# Local caches
+/.gocache/
+/.aptly/
+
+# Release and package artifacts
+*.deb
+*.rpm
+*.apk
+*.tar.gz
+*.tgz
+*.zip
+checksums.txt
+tasker
+.tasker/

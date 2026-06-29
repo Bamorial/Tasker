@@ -1,0 +1,90 @@
+version: 2
+
+project_name: tasker
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: tasker
+    main: .
+    binary: tasker
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+      - goos: linux
+        goarch: arm64
+      - goos: darwin
+        goarch: amd64
+    ldflags:
+      - -s -w -X github.com/bamorial/tasker/internal/buildinfo.Version={{ .Version }} -X github.com/bamorial/tasker/internal/buildinfo.Commit={{ .Commit }} -X github.com/bamorial/tasker/internal/buildinfo.Date={{ .Date }}
+
+archives:
+  - id: release-archives
+    ids:
+      - tasker
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  disable: true
+
+nfpms:
+  - id: deb
+    package_name: tasker
+    file_name_template: "{{ .ConventionalFileName }}"
+    homepage: https://github.com/bamorial/tasker
+    description: CLI-first universal agent workspace protocol
+    maintainer: Tasker Maintainers <maintainers@tasker.invalid>
+    license: MIT
+    formats:
+      - deb
+    ids:
+      - tasker
+    bindir: /usr/bin
+    contents:
+      - src: README.md
+        dst: /usr/share/doc/tasker/README.md
+
+brews:
+  - name: tasker
+    ids:
+      - tasker
+    homepage: https://github.com/bamorial/tasker
+    description: CLI-first universal agent workspace protocol
+    license: MIT
+    repository:
+      owner: "{{ .Env.HOMEBREW_TAP_OWNER }}"
+      name: "{{ .Env.HOMEBREW_TAP_NAME }}"
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    commit_author:
+      name: tasker-bot
+      email: releases@tasker.invalid
+    test: |
+      system "#{bin}/tasker", "version"
+    install: |
+      bin.install "tasker"

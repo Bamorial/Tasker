@@ -1,0 +1,959 @@
+BUILD TASKER
+
+You are building Tasker.
+
+Tasker is a cross-platform CLI-first developer productivity tool.
+
+The goal:
+
+Create a universal AI agent workspace protocol where tasks, knowledge, history, and decisions are stored as files so any AI agent or human can continue work without depending on a specific model.
+
+The core principle:
+
+A task is a permanent document.
+An agent is a temporary worker.
+
+Agents can be replaced at any time because the task contains all context required.
+
+==================================================
+TECH STACK
+==================================================
+
+Language:
+Go
+
+Reason:
+- single binary
+- fast startup
+- works on Linux/macOS/Windows
+- easy distribution
+
+CLI:
+Use Cobra.
+
+Storage:
+Filesystem first.
+
+Optional:
+SQLite for indexing and memory.
+
+Git:
+Use system git commands or go-git.
+
+==================================================
+DISTRIBUTION
+==================================================
+
+The final project must support:
+
+macOS:
+
+brew install tasker
+
+Linux:
+
+sudo apt install tasker
+
+Windows:
+
+winget install tasker
+
+
+Build binaries:
+
+tasker-linux-amd64
+tasker-darwin-arm64
+tasker-windows-amd64.exe
+
+
+==================================================
+PROJECT INITIALIZATION
+==================================================
+
+Command:
+
+tasker init
+
+
+Creates:
+
+.tasker/
+
+    START.md
+    instructions.md
+    agent.md
+    config.yaml
+
+    tasks/
+    refs/
+    memory/
+    current/
+    sessions/
+    logs/
+
+
+Also create:
+
+AGENTS.md
+
+
+AGENTS.md is the universal entry point for AI agents.
+
+
+==================================================
+AGENTS.md
+==================================================
+
+Generate:
+
+AGENTS.md
+
+
+Content:
+
+This repository uses Tasker.
+
+Before working:
+
+1. Read .tasker/START.md
+
+2. Read .tasker/current/WORKSPACE.md if it exists
+
+3. Read .tasker/instructions.md
+
+All important communication must happen through:
+
+- declaration.md
+- result.md
+- status.json
+
+
+Never leave undocumented changes.
+
+
+==================================================
+START.md
+==================================================
+
+Create:
+
+.tasker/START.md
+
+
+Purpose:
+
+Universal protocol for any agent.
+
+It must explain:
+
+- how tasks work
+- where instructions are
+- where current work exists
+- how agents communicate
+
+
+Any AI agent should understand the project by reading this file.
+
+
+==================================================
+PROJECT INSTRUCTIONS
+==================================================
+
+Command:
+
+tasker instructions
+
+
+Opens:
+
+.tasker/instructions.md
+
+
+This contains project-wide rules.
+
+
+Example:
+
+Architecture:
+
+Frontend:
+React
+
+Backend:
+Go
+
+
+Rules:
+
+- add tests
+- do not break APIs
+- follow existing patterns
+
+
+Every agent receives this.
+
+
+==================================================
+AGENT RULES
+==================================================
+
+Create:
+
+.tasker/agent.md
+
+
+Defines agent behavior.
+
+
+Rules:
+
+Before work:
+
+- read task.md
+- read instructions.md
+- read declaration.md
+- read current workspace
+
+
+During work:
+
+- update declaration.md
+
+
+After work:
+
+- update result.md
+- update status.json
+
+
+No undocumented changes.
+
+
+==================================================
+TASK MODEL
+==================================================
+
+A task is a folder.
+
+Example:
+
+.tasker/tasks/001-authentication/
+
+
+Contains:
+
+
+task.md
+
+Goal and requirements.
+
+
+instructions.md
+
+Task-specific rules.
+
+
+declaration.md
+
+Agent handoff document.
+
+
+status.json
+
+Current state.
+
+
+context.json
+
+Generated context.
+
+
+result.md
+
+Final report.
+
+
+
+==================================================
+CREATE TASK
+==================================================
+
+Command:
+
+tasker new
+
+
+Opens editor.
+
+Creates:
+
+.tasker/tasks/001-name/
+
+
+Use:
+
+$EDITOR
+
+
+Support:
+
+- vim
+- nano
+- VS Code
+- Cursor
+
+
+==================================================
+TASK HIERARCHY
+==================================================
+
+Tasks support unlimited nesting.
+
+There is NO depth limit.
+
+
+Example:
+
+
+Authentication
+
+    Research JWT
+
+    Backend
+
+        Middleware
+
+            JWT parser
+
+                Token validation
+
+                    Expiration check
+
+
+
+Filesystem:
+
+
+001-auth/
+
+    children/
+
+        002-research/
+
+        003-backend/
+
+            children/
+
+                004-middleware/
+
+                    children/
+
+                        005-parser/
+
+                            children/
+
+                                006-expiration/
+
+
+
+Every task can have:
+
+parent
+
+children
+
+
+Store relationships in metadata.
+
+
+==================================================
+TASK COMMANDS
+==================================================
+
+
+tasker new
+
+Create task.
+
+
+tasker open <id>
+
+Open task.
+
+
+tasker add <name>
+
+Create child task.
+
+
+tasker tree
+
+Show hierarchy.
+
+
+tasker status
+
+Show states.
+
+
+
+==================================================
+TASK TYPES
+==================================================
+
+Support:
+
+
+feature
+
+bug
+
+research
+
+decision
+
+documentation
+
+review
+
+
+
+Research tasks:
+
+Do not modify code.
+
+Produce:
+
+result.md
+
+
+Example:
+
+result.md:
+
+Finding:
+
+Redis is suitable.
+
+Reason:
+
+Low latency.
+
+Risks:
+
+Need invalidation strategy.
+
+
+==================================================
+REFERENCES SYSTEM
+==================================================
+
+Create:
+
+.tasker/refs/
+
+
+Support Obsidian-style references:
+
+
+[[document-name]]
+
+
+Example:
+
+
+Read:
+
+[[architecture]]
+
+before implementing.
+
+
+References can point to:
+
+- files
+- tasks
+- decisions
+- research
+- documentation
+
+
+
+==================================================
+AGENT WORKSPACE
+==================================================
+
+Main command:
+
+
+tasker checkout <task>
+
+
+This prepares the environment.
+
+Create:
+
+
+.tasker/current/
+
+
+Files:
+
+
+WORKSPACE.md
+
+FILES.md
+
+CONTEXT.json
+
+
+
+WORKSPACE.md contains:
+
+Current task.
+
+Parent tasks.
+
+Instructions.
+
+Relevant files.
+
+References.
+
+Memory results.
+
+Expected output.
+
+
+
+Example:
+
+
+Current task:
+
+Implement authentication middleware.
+
+
+Rules:
+
+Do not break API.
+
+
+Relevant files:
+
+src/auth.ts
+
+src/router.ts
+
+
+Previous decisions:
+
+JWT selected.
+
+
+Expected:
+
+- middleware
+- tests
+- docs
+
+
+
+==================================================
+AGENT EXECUTION
+==================================================
+
+IMPORTANT:
+
+Tasker must NOT depend on Claude or Codex.
+
+
+Tasker is an agent-neutral protocol.
+
+
+Optional helper:
+
+tasker run
+
+
+can launch agents.
+
+But the filesystem protocol must work without it.
+
+
+Agents supported:
+
+- Claude
+- Codex
+- Cursor
+- Aider
+- future agents
+
+
+
+==================================================
+AGENT COMMUNICATION
+==================================================
+
+Every task has:
+
+
+declaration.md
+
+
+This is the main communication channel.
+
+
+Example:
+
+
+Status:
+
+IN PROGRESS
+
+
+Understanding:
+
+Authentication uses JWT.
+
+
+Completed:
+
+Created middleware.
+
+
+Files:
+
+src/auth/middleware.go
+
+
+Decisions:
+
+Used middleware layer.
+
+Reason:
+
+Keep controllers unchanged.
+
+
+Remaining:
+
+Refresh tokens.
+
+
+Next agent:
+
+Continue refresh token implementation.
+
+
+
+==================================================
+AGENT SESSIONS
+==================================================
+
+Every agent run creates:
+
+
+sessions/
+
+
+Example:
+
+
+sessions/
+
+    001-agent-name/
+
+        prompt.md
+
+        response.md
+
+        changes.json
+
+
+
+Store:
+
+- agent
+- timestamp
+- files changed
+- decisions
+- notes
+
+
+
+==================================================
+AGENT REPLACEMENT
+==================================================
+
+A new agent must be able to continue.
+
+
+The new agent reads:
+
+
+task.md
+
+instructions.md
+
+declaration.md
+
+result.md
+
+sessions/
+
+git history
+
+
+
+It must not need previous conversation history.
+
+
+==================================================
+STATUS SYSTEM
+==================================================
+
+States:
+
+
+NEW
+
+PLANNED
+
+RUNNING
+
+HANDOFF
+
+REVIEW
+
+COMPLETED
+
+
+
+status.json example:
+
+
+{
+ "status":"running",
+ "agent":"unknown",
+ "started":"date"
+}
+
+
+
+==================================================
+GIT INTEGRATION
+==================================================
+
+Optional.
+
+
+config.yaml:
+
+
+git:
+
+ enabled:true
+
+ branch_per_task:true
+
+ commit_per_subtask:true
+
+
+
+When task starts:
+
+create branch:
+
+
+task/001-authentication
+
+
+
+When subtask completes:
+
+commit:
+
+
+task 005:
+implement jwt parser
+
+
+
+If disabled:
+
+Tasker works normally.
+
+
+
+==================================================
+MEMORY SYSTEM
+==================================================
+
+Tasker is a project second brain.
+
+
+Do not send entire repository to agents.
+
+
+Index:
+
+- files
+- symbols
+- functions
+- tasks
+- decisions
+- previous results
+
+
+
+Storage:
+
+
+.tasker/memory/
+
+
+Use SQLite.
+
+
+Support:
+
+
+tasker memory index
+
+
+tasker memory search <query>
+
+
+
+Example:
+
+
+tasker memory search authentication
+
+
+returns:
+
+
+src/auth/service.go
+
+
+Reason:
+
+contains authentication logic.
+
+
+
+==================================================
+MCP FUTURE
+==================================================
+
+Design architecture so MCP can be added later.
+
+
+Expose:
+
+
+get_current_task()
+
+get_context()
+
+search_memory()
+
+get_reference()
+
+update_status()
+
+submit_result()
+
+
+
+==================================================
+FINAL CLI
+==================================================
+
+
+tasker init
+
+tasker instructions
+
+tasker new
+
+tasker open <id>
+
+tasker add <name>
+
+tasker tree
+
+tasker checkout <id>
+
+tasker status
+
+tasker memory index
+
+tasker memory search
+
+tasker ref add
+
+tasker config
+
+
+
+==================================================
+IMPLEMENTATION ORDER
+==================================================
+
+
+PHASE 1:
+
+- Go project
+- CLI
+- init
+- filesystem structure
+- tasks
+- nesting
+- editor opening
+
+
+PHASE 2:
+
+- references
+- instructions
+- declaration system
+- status
+
+
+PHASE 3:
+
+- checkout
+- workspace generation
+- agent protocol
+
+
+PHASE 4:
+
+- git integration
+
+
+PHASE 5:
+
+- memory indexing
+
+
+PHASE 6:
+
+- MCP
+
+
+
+FINAL GOAL:
+
+Build a universal task protocol.
+
+Tasker must not be an AI wrapper.
+
+Tasker must be the persistent layer that any AI agent can use.
+
+The task is the source of truth.
+The agent is replaceable.
+The knowledge remains.
