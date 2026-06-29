@@ -254,14 +254,13 @@ func TaskStatusesStyled(root string, opts StatusFormatOptions) ([]string, error)
 		return []string{"No tasks."}, nil
 	}
 
-	sort.Slice(tasks, func(i, j int) bool {
-		return taskSortKey(tasks[i].Meta.ID, tasks[i].Path) < taskSortKey(tasks[j].Meta.ID, tasks[j].Path)
-	})
-
 	palette := newStatusPalette(opts.Color)
 	lines := make([]string, 0, len(tasks))
 	for _, task := range tasks {
-		lines = append(lines, formatTaskSummaryLine(task, "", palette))
+		if task.Meta.ParentID != "" {
+			continue
+		}
+		appendTaskStatusTreeStyled(task, 0, &lines, palette)
 	}
 	return lines, nil
 }
@@ -707,14 +706,34 @@ func (p statusPalette) wrap(code, value string) string {
 }
 
 func formatTaskSummaryLine(task Task, prefix string, palette statusPalette) string {
+	details := []string{task.Meta.Type}
+	if agent := strings.TrimSpace(task.Status.Agent); agent != "" {
+		details = append(details, "agent="+agent)
+	}
+	if childCount, err := childTaskCount(task.Path); err == nil && childCount > 0 {
+		label := "children"
+		if childCount == 1 {
+			label = "child"
+		}
+		details = append(details, fmt.Sprintf("%d %s", childCount, label))
+	}
+
 	return fmt.Sprintf(
 		"%s%s  %-18s %s %s",
 		prefix,
 		task.Meta.ID,
 		palette.statusBadge(task.Status.Status),
 		task.Meta.Title,
-		palette.subtle("("+task.Meta.Type+")"),
+		palette.subtle("("+strings.Join(details, " | ")+")"),
 	)
+}
+
+func childTaskCount(taskPath string) (int, error) {
+	children, err := childTasks(taskPath)
+	if err != nil {
+		return 0, err
+	}
+	return len(children), nil
 }
 
 func formatDetailField(label, value string, palette statusPalette) string {

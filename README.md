@@ -54,7 +54,8 @@ VERSION=v0.1.0 COMMIT=local DATE=2026-06-29T00:00:00Z ./scripts/build.sh
 
 - Task IDs are global across the workspace.
 - `tasker instruction <id>` opens a task's `instructions.md`.
-- `tasker status` shows a workspace-wide task overview, and `tasker status <id>` shows details for one task plus its subtasks and handoff notes.
+- `tasker status` shows a workspace-wide task tree, including subtasks plus per-task status metadata such as type, agent, and child counts.
+- `tasker status <id>` shows details for one task plus its subtasks and handoff notes.
 - `tasker status` uses ANSI color and stronger section formatting when writing to an interactive terminal, and falls back to plain text when redirected.
 - `tasker checkout <id>` populates `.tasker/current/WORKSPACE.md`, `.tasker/current/FILES.md`, and `.tasker/current/CONTEXT.json` so the next agent has explicit workspace context.
 - When Git is enabled, `tasker checkout <id>` only auto-creates or reuses a branch if `git.checkout_branch: true` is set in `.tasker/config.yaml`.

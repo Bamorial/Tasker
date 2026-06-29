@@ -97,6 +97,67 @@ func TestTaskStatusesIncludesAllTasks(t *testing.T) {
 	}
 }
 
+func TestTaskStatusesShowsTreeAndTaskMetadata(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	parent, err := CreateTask(root, CreateTaskInput{Title: "Parent", Type: "feature"})
+	if err != nil {
+		t.Fatalf("CreateTask parent: %v", err)
+	}
+
+	child, err := CreateTask(root, CreateTaskInput{
+		Title:    "Child",
+		Type:     "documentation",
+		ParentID: parent.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateTask child: %v", err)
+	}
+
+	if err := writeJSON(filepath.Join(parent.Path, "status.json"), TaskStatus{
+		Status:  "IN_PROGRESS",
+		Agent:   "planner",
+		Started: "2026-06-29T20:00:00+03:00",
+	}); err != nil {
+		t.Fatalf("write parent status: %v", err)
+	}
+
+	if err := writeJSON(filepath.Join(child.Path, "status.json"), TaskStatus{
+		Status:  "DONE",
+		Agent:   "worker",
+		Started: "2026-06-29T20:05:00+03:00",
+	}); err != nil {
+		t.Fatalf("write child status: %v", err)
+	}
+
+	rows, err := TaskStatuses(root)
+	if err != nil {
+		t.Fatalf("TaskStatuses: %v", err)
+	}
+
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+
+	if !strings.Contains(rows[0], parent.ID) ||
+		!strings.Contains(rows[0], "[IN_PROGRESS]") ||
+		!strings.Contains(rows[0], "Parent") ||
+		!strings.Contains(rows[0], "agent=planner") ||
+		!strings.Contains(rows[0], "1 child") {
+		t.Fatalf("expected parent row to include metadata, got %q", rows[0])
+	}
+
+	if !strings.HasPrefix(rows[1], "  "+child.ID) ||
+		!strings.Contains(rows[1], "[DONE]") ||
+		!strings.Contains(rows[1], "Child") ||
+		!strings.Contains(rows[1], "agent=worker") {
+		t.Fatalf("expected child row to be indented subtree output, got %q", rows[1])
+	}
+}
+
 func TestTaskStatusDetailsIncludesSubtasks(t *testing.T) {
 	root := t.TempDir()
 	if err := InitializeWorkspace(root); err != nil {
@@ -207,6 +268,10 @@ func TestTaskStatusesStyledIncludesANSIWhenEnabled(t *testing.T) {
 
 	if !strings.Contains(rows[0], "\x1b[1;34m[NEW]\x1b[0m") {
 		t.Fatalf("expected styled row to include ANSI status badge, got %q", rows[0])
+	}
+
+	if !strings.Contains(rows[0], "(feature | agent=unknown)") {
+		t.Fatalf("expected styled row to include task metadata, got %q", rows[0])
 	}
 }
 
