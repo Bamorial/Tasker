@@ -9,6 +9,7 @@ Tasker is a CLI-first universal agent workspace protocol. The idea is simple: hu
 Implemented:
 
 - `tasker init`
+- `tasker checkout <id>`
 - `tasker instruction <id>`
 - `tasker instructions`
 - `tasker new [title]`
@@ -54,6 +55,11 @@ VERSION=v0.1.0 COMMIT=local DATE=2026-06-29T00:00:00Z ./scripts/build.sh
 - Task IDs are global across the workspace.
 - `tasker instruction <id>` opens a task's `instructions.md`.
 - `tasker status` shows a workspace-wide task overview, and `tasker status <id>` shows details for one task plus its subtasks and handoff notes.
+- `tasker status` uses ANSI color and stronger section formatting when writing to an interactive terminal, and falls back to plain text when redirected.
+- `tasker checkout <id>` populates `.tasker/current/WORKSPACE.md`, `.tasker/current/FILES.md`, and `.tasker/current/CONTEXT.json` so the next agent has explicit workspace context.
+- When Git is enabled, `tasker checkout <id>` only auto-creates or reuses a branch if `git.checkout_branch: true` is set in `.tasker/config.yaml`.
+- `tasker checkout <id> --existing-branch <name>` links a task to an existing branch, and `--branch <name>` lets you override the generated task branch name.
+- Agent guidance expects child-task work to include reading the parent task chain for inherited context and constraints.
 - Child tasks are stored in each task's `children/` directory.
 - `tasker delete <id>` removes a leaf task, and requires `--recursive` for tasks that have children.
 - `tasker new` and `tasker add` support `--open task|instructions|declaration|result|meta` and `--no-open`.
@@ -69,7 +75,9 @@ editor: "code -w"
 git:
   enabled: false
   branch_per_task: true
+  checkout_branch: false
   commit_per_subtask: true
+  branch_prefix: "task"
 ```
 
 Global install:

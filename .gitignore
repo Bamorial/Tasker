@@ -15,6 +15,7 @@ coverage.out
 
 # Local caches
 /.gocache/
+/.gomodcache/
 /.aptly/
 
 # Release and package artifacts
@@ -25,5 +26,5 @@ coverage.out
 *.tgz
 *.zip
 checksums.txt
-tasker
+/tasker
 .tasker/
