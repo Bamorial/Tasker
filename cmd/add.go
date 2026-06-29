@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/bamorial/tasker/internal/tasker"
 	"github.com/spf13/cobra"
@@ -63,7 +64,7 @@ var addCmd = &cobra.Command{
 
 func init() {
 	addCmd.Flags().StringVar(&addParentID, "parent", "", "Parent task ID")
-	addCmd.Flags().StringVar(&addTaskType, "type", "feature", "Task type")
+	addCmd.Flags().StringVar(&addTaskType, "type", "feature", fmt.Sprintf("Task type (%s)", strings.Join(tasker.ValidTaskTypes(), ", ")))
 	addCmd.Flags().StringVar(&addOpenTarget, "open", "task", "Document to open: task, instructions, declaration, result, meta")
 	addCmd.Flags().BoolVar(&addNoOpen, "no-open", false, "Create the task without opening an editor")
 }

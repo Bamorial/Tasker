@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/bamorial/tasker/internal/tasker"
 	"github.com/spf13/cobra"
@@ -52,6 +53,6 @@ var metaCmd = &cobra.Command{
 
 func init() {
 	metaCmd.Flags().StringVar(&metaTitle, "title", "", "Update the task title")
-	metaCmd.Flags().StringVar(&metaTaskType, "type", "", "Update the task type")
+	metaCmd.Flags().StringVar(&metaTaskType, "type", "", fmt.Sprintf("Update the task type (%s)", strings.Join(tasker.ValidTaskTypes(), ", ")))
 	metaCmd.Flags().BoolVar(&metaOpen, "open", false, "Open meta.json after applying any updates")
 }
