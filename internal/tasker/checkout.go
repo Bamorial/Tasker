@@ -10,6 +10,7 @@ type CheckoutTaskInput struct {
 	Branch         string
 	ExistingBranch string
 	NoBranch       bool
+	ForceBranch    bool
 }
 
 type CheckoutTaskResult struct {
@@ -53,8 +54,8 @@ func checkoutTaskBranch(root string, task *Task, cfg Config, input CheckoutTaskI
 	branchName := strings.TrimSpace(input.Branch)
 	existingBranch := strings.TrimSpace(input.ExistingBranch)
 
-	if input.NoBranch && (branchName != "" || existingBranch != "") {
-		return "", fmt.Errorf("--no-branch cannot be combined with --branch or --existing-branch")
+	if input.NoBranch && (branchName != "" || existingBranch != "" || input.ForceBranch) {
+		return "", fmt.Errorf("--no-branch cannot be combined with --branch, --existing-branch, or forced branch checkout")
 	}
 	if branchName != "" && existingBranch != "" {
 		return "", fmt.Errorf("--branch and --existing-branch cannot be used together")
@@ -63,7 +64,7 @@ func checkoutTaskBranch(root string, task *Task, cfg Config, input CheckoutTaskI
 		return "", nil
 	}
 
-	autoBranch := shouldAutoBranch(cfg)
+	autoBranch := shouldAutoBranch(cfg) || input.ForceBranch
 	if branchName == "" && existingBranch == "" && !autoBranch {
 		return "", nil
 	}

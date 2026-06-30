@@ -64,7 +64,7 @@ var addCmd = &cobra.Command{
 
 func init() {
 	addCmd.Flags().StringVar(&addParentID, "parent", "", "Parent task ID")
-	addCmd.Flags().StringVar(&addTaskType, "type", "feature", fmt.Sprintf("Task type (%s)", strings.Join(tasker.ValidTaskTypes(), ", ")))
+	addCmd.Flags().StringVar(&addTaskType, "type", "", fmt.Sprintf("Task type (%s)", strings.Join(tasker.ValidTaskTypes(), ", ")))
 	addCmd.Flags().StringVar(&addOpenTarget, "open", "task", "Document to open: task, instructions, declaration, result, meta")
 	addCmd.Flags().BoolVar(&addNoOpen, "no-open", false, "Create the task without opening an editor")
 }

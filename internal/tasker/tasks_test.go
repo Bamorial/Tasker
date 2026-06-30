@@ -43,6 +43,123 @@ func TestGetTaskIncludesInstructionsFile(t *testing.T) {
 	}
 }
 
+func TestInitializeWorkspaceCreatesTaskTemplates(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	templates := []string{
+		"default.md",
+		"bug.md",
+		"decision.md",
+		"documentation.md",
+		"feature.md",
+		"research.md",
+		"review.md",
+	}
+
+	for _, name := range templates {
+		path := filepath.Join(root, TaskerDirName, "templates", "tasks", name)
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected template %s to exist: %v", path, err)
+		}
+	}
+}
+
+func TestCreateTaskUsesDefaultTemplateWhenTypeOmitted(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	created, err := CreateTask(root, CreateTaskInput{Title: "Untyped Task"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	data, err := os.ReadFile(created.TaskFile)
+	if err != nil {
+		t.Fatalf("ReadFile task.md: %v", err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "# Untyped Task") {
+		t.Fatalf("expected default template to include title, got:\n%s", content)
+	}
+	if !strings.Contains(content, "## Goal") {
+		t.Fatalf("expected default template to include goal section, got:\n%s", content)
+	}
+	if strings.Contains(content, "[write here]") {
+		t.Fatalf("expected default template to preserve legacy generic body, got:\n%s", content)
+	}
+}
+
+func TestCreateTaskUsesTaskTypeTemplate(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	created, err := CreateTask(root, CreateTaskInput{Title: "Fix Login", Type: "bug"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	data, err := os.ReadFile(created.TaskFile)
+	if err != nil {
+		t.Fatalf("ReadFile task.md: %v", err)
+	}
+
+	content := string(data)
+	for _, want := range []string{
+		"# Bug",
+		"## Problem",
+		"## Steps",
+		"## Expected",
+		"[write here]",
+		"Type: bug",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("expected bug template to include %q, got:\n%s", want, content)
+		}
+	}
+}
+
+func TestCreateTaskUsesCustomizedWorkspaceTemplate(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	customTemplate := "# Custom Feature\n\nTask {{ID}}: {{TITLE}}\n\n## Ship\n\n[write here]\n"
+	templatePath := filepath.Join(root, TaskerDirName, "templates", "tasks", "feature.md")
+	if err := os.WriteFile(templatePath, []byte(customTemplate), 0o644); err != nil {
+		t.Fatalf("WriteFile custom template: %v", err)
+	}
+
+	created, err := CreateTask(root, CreateTaskInput{Title: "Launch API", Type: "feature"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	data, err := os.ReadFile(created.TaskFile)
+	if err != nil {
+		t.Fatalf("ReadFile task.md: %v", err)
+	}
+
+	content := string(data)
+	for _, want := range []string{
+		"# Custom Feature",
+		"Task " + created.ID + ": Launch API",
+		"## Ship",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("expected customized template to include %q, got:\n%s", want, content)
+		}
+	}
+}
+
 func TestDeleteLeafTask(t *testing.T) {
 	root := t.TempDir()
 	if err := InitializeWorkspace(root); err != nil {
@@ -656,6 +773,50 @@ func TestCheckoutTaskLinksExistingBranch(t *testing.T) {
 
 	if result.Branch != "feature/manual-link" {
 		t.Fatalf("expected linked branch feature/manual-link, got %s", result.Branch)
+	}
+}
+
+func TestCheckoutTaskForceBranchCreatesBranchWithoutCheckoutFlag(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	root := t.TempDir()
+	initializeGitRepo(t, root)
+
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, TaskerDirName, "config.yaml"), []byte("editor: \"\"\ngit:\n  enabled: true\n  branch_per_task: true\n  checkout_branch: false\n  commit_per_subtask: true\n  branch_prefix: \"task\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+
+	task, err := CreateTask(root, CreateTaskInput{Title: "Root Feature", Type: "feature"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	result, err := CheckoutTask(root, task.ID, CheckoutTaskInput{ForceBranch: true})
+	if err != nil {
+		t.Fatalf("CheckoutTask: %v", err)
+	}
+
+	wantBranch := "task/" + task.ID + "-root-feature"
+	if result.Branch != wantBranch {
+		t.Fatalf("expected branch %s, got %s", wantBranch, result.Branch)
+	}
+
+	repo, err := OpenGitRepo(root)
+	if err != nil {
+		t.Fatalf("OpenGitRepo: %v", err)
+	}
+	gotBranch, err := repo.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	if gotBranch != wantBranch {
+		t.Fatalf("expected current branch %s, got %s", wantBranch, gotBranch)
 	}
 }
 

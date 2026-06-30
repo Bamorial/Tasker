@@ -96,7 +96,8 @@ func DeleteTask(root, id string, recursive bool) error {
 }
 
 func CreateTask(root string, input CreateTaskInput) (*CreatedTask, error) {
-	taskType := strings.TrimSpace(strings.ToLower(input.Type))
+	requestedType := strings.TrimSpace(strings.ToLower(input.Type))
+	taskType := requestedType
 	if taskType == "" {
 		taskType = "feature"
 	}
@@ -154,7 +155,7 @@ func CreateTask(root string, input CreateTaskInput) (*CreatedTask, error) {
 	}
 
 	files := map[string]string{
-		filepath.Join(taskPath, "task.md"):         taskMarkdown(meta),
+		filepath.Join(taskPath, "task.md"):         taskMarkdown(root, meta, requestedType != ""),
 		filepath.Join(taskPath, "instructions.md"): "# Task Instructions\n\nAdd task-specific rules here.\n",
 		filepath.Join(taskPath, "declaration.md"):  "# Declaration\n\nStatus:\n\nUnderstanding:\n\nCompleted:\n\nFiles:\n\nDecisions:\n\nRemaining:\n\nNext agent:\n",
 		filepath.Join(taskPath, "result.md"):       "# Result\n\nSummary:\n",
@@ -554,17 +555,50 @@ func slugify(input string) string {
 	return slug
 }
 
-func taskMarkdown(meta TaskMeta) string {
-	return fmt.Sprintf(`# %s
+func taskMarkdown(root string, meta TaskMeta, useTypeTemplate bool) string {
+	templateName := "default"
+	if useTypeTemplate {
+		templateName = meta.Type
+	}
 
-ID: %s
-Type: %s
-Created: %s
+	content, err := loadTaskTemplate(root, templateName)
+	if err != nil {
+		return renderTaskTemplate(taskDocumentTemplate(), meta)
+	}
 
-## Goal
+	return renderTaskTemplate(content, meta)
+}
 
-Describe the goal and requirements.
-`, meta.Title, meta.ID, meta.Type, meta.CreatedAt)
+func loadTaskTemplate(root, templateName string) (string, error) {
+	path := filepath.Join(root, TaskerDirName, "templates", "tasks", templateName+".md")
+	data, err := os.ReadFile(path)
+	if err == nil {
+		return string(data), nil
+	}
+	if !os.IsNotExist(err) {
+		return "", err
+	}
+
+	if templateName == "default" {
+		return taskDocumentTemplate(), nil
+	}
+
+	return taskTypeTemplate(templateName), nil
+}
+
+func renderTaskTemplate(content string, meta TaskMeta) string {
+	replacements := map[string]string{
+		"{{TITLE}}":      meta.Title,
+		"{{ID}}":         meta.ID,
+		"{{TYPE}}":       meta.Type,
+		"{{CREATED_AT}}": meta.CreatedAt,
+	}
+
+	for needle, value := range replacements {
+		content = strings.ReplaceAll(content, needle, value)
+	}
+
+	return content
 }
 
 func InferParentTaskID(root, start string) (string, error) {

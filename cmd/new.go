@@ -11,6 +11,8 @@ import (
 var newTaskType string
 var newOpenTarget string
 var newNoOpen bool
+var newCheckout bool
+var newBranchCheckout bool
 
 var newCmd = &cobra.Command{
 	Use:   "new [title]",
@@ -36,6 +38,20 @@ var newCmd = &cobra.Command{
 		}
 
 		fmt.Fprintf(cmd.OutOrStdout(), "Created task %s: %s\n", created.ID, created.Path)
+		if newCheckout || newBranchCheckout {
+			result, err := tasker.CheckoutTask(root, created.ID, tasker.CheckoutTaskInput{
+				NoBranch:    !newBranchCheckout,
+				ForceBranch: newBranchCheckout,
+			})
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Checked out task: %s\n", result.Task.Meta.ID)
+			if result.Branch != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "Git branch: %s\n", result.Branch)
+			}
+		}
+
 		if newNoOpen {
 			return nil
 		}
@@ -53,7 +69,9 @@ var newCmd = &cobra.Command{
 }
 
 func init() {
-	newCmd.Flags().StringVar(&newTaskType, "type", "feature", fmt.Sprintf("Task type (%s)", strings.Join(tasker.ValidTaskTypes(), ", ")))
+	newCmd.Flags().StringVar(&newTaskType, "type", "", fmt.Sprintf("Task type (%s)", strings.Join(tasker.ValidTaskTypes(), ", ")))
 	newCmd.Flags().StringVar(&newOpenTarget, "open", "task", "Document to open: task, instructions, declaration, result, meta")
 	newCmd.Flags().BoolVar(&newNoOpen, "no-open", false, "Create the task without opening an editor")
+	newCmd.Flags().BoolVarP(&newCheckout, "checkout", "c", false, "Create the task and set it as the current workspace without switching Git branches")
+	newCmd.Flags().BoolVarP(&newBranchCheckout, "branch-checkout", "b", false, "Create the task, set it as current, and create or switch to its task branch")
 }

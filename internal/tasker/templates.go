@@ -1,5 +1,7 @@
 package tasker
 
+import "fmt"
+
 func agentsTemplate() string {
 	return `This repository uses Tasker.
 
@@ -114,4 +116,86 @@ Expected output:
 func filesTemplate() string {
 	return `# Relevant Files
 `
+}
+
+func taskDocumentTemplate() string {
+	return `# {{TITLE}}
+
+ID: {{ID}}
+Type: {{TYPE}}
+Created: {{CREATED_AT}}
+
+## Goal
+
+Describe the goal and requirements.
+`
+}
+
+func taskTypeTemplate(taskType string) string {
+	switch taskType {
+	case "bug":
+		return taskTypeTemplateWithSections("Bug", []taskTemplateSection{
+			{Title: "Problem", Prompt: "What is broken?"},
+			{Title: "Steps", Prompt: "How can it be reproduced?"},
+			{Title: "Expected", Prompt: "What should happen?"},
+			{Title: "Notes", Prompt: "Logs, screenshots, or extra context:"},
+		})
+	case "feature":
+		return taskTypeTemplateWithSections("Feature", []taskTemplateSection{
+			{Title: "Goal", Prompt: "What are we adding?"},
+			{Title: "Details", Prompt: "How should it work?"},
+			{Title: "Acceptance", Prompt: "How do we know it is done?"},
+		})
+	case "research":
+		return taskTypeTemplateWithSections("Research", []taskTemplateSection{
+			{Title: "Question", Prompt: "What are we trying to understand?"},
+			{Title: "Context", Prompt: "Why do we need this?"},
+			{Title: "Result", Prompt: "What should the research produce?"},
+		})
+	case "documentation":
+		return taskTypeTemplateWithSections("Documentation", []taskTemplateSection{
+			{Title: "Topic", Prompt: "What needs documentation?"},
+			{Title: "Audience", Prompt: "Who is this for?"},
+			{Title: "Notes", Prompt: "Important details:"},
+		})
+	case "decision":
+		return taskTypeTemplateWithSections("Decision", []taskTemplateSection{
+			{Title: "Decision", Prompt: "What needs to be decided?"},
+			{Title: "Options", Prompt: "Possible approaches:"},
+			{Title: "Notes", Prompt: "Important constraints:"},
+		})
+	case "review":
+		return taskTypeTemplateWithSections("Review", []taskTemplateSection{
+			{Title: "Target", Prompt: "What should be reviewed?"},
+			{Title: "Focus", Prompt: "What should reviewers check?"},
+			{Title: "Notes", Prompt: "Extra context:"},
+		})
+	default:
+		return taskDocumentTemplate()
+	}
+}
+
+type taskTemplateSection struct {
+	Title  string
+	Prompt string
+}
+
+func taskTypeTemplateWithSections(label string, sections []taskTemplateSection) string {
+	body := fmt.Sprintf(`# %s
+
+ID: {{ID}}
+Type: {{TYPE}}
+Created: {{CREATED_AT}}
+`, label)
+
+	for _, section := range sections {
+		body += fmt.Sprintf(`
+## %s
+
+%s
+
+`, section.Title, section.Prompt)
+	}
+
+	return body
 }

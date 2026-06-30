@@ -43,6 +43,8 @@ func InitializeWorkspace(root string) error {
 		filepath.Join(root, TaskerDirName, "current"),
 		filepath.Join(root, TaskerDirName, "sessions"),
 		filepath.Join(root, TaskerDirName, "logs"),
+		filepath.Join(root, TaskerDirName, "templates"),
+		filepath.Join(root, TaskerDirName, "templates", "tasks"),
 	}
 
 	for _, dir := range dirs {
@@ -52,14 +54,21 @@ func InitializeWorkspace(root string) error {
 	}
 
 	files := map[string]string{
-		filepath.Join(root, "AGENTS.md"):                               agentsTemplate(),
-		filepath.Join(root, TaskerDirName, "START.md"):                 startTemplate(),
-		filepath.Join(root, TaskerDirName, "instructions.md"):          instructionsTemplate(),
-		filepath.Join(root, TaskerDirName, "agent.md"):                 agentTemplate(),
-		filepath.Join(root, TaskerDirName, "config.yaml"):              configTemplate(),
-		filepath.Join(root, TaskerDirName, "current", "WORKSPACE.md"):  workspaceTemplate(),
-		filepath.Join(root, TaskerDirName, "current", "FILES.md"):      filesTemplate(),
-		filepath.Join(root, TaskerDirName, "current", "CONTEXT.json"):  "{}\n",
+		filepath.Join(root, "AGENTS.md"):                                             agentsTemplate(),
+		filepath.Join(root, TaskerDirName, "START.md"):                               startTemplate(),
+		filepath.Join(root, TaskerDirName, "instructions.md"):                        instructionsTemplate(),
+		filepath.Join(root, TaskerDirName, "agent.md"):                               agentTemplate(),
+		filepath.Join(root, TaskerDirName, "config.yaml"):                            configTemplate(),
+		filepath.Join(root, TaskerDirName, "current", "WORKSPACE.md"):                workspaceTemplate(),
+		filepath.Join(root, TaskerDirName, "current", "FILES.md"):                    filesTemplate(),
+		filepath.Join(root, TaskerDirName, "current", "CONTEXT.json"):                "{}\n",
+		filepath.Join(root, TaskerDirName, "templates", "tasks", "default.md"):       taskDocumentTemplate(),
+		filepath.Join(root, TaskerDirName, "templates", "tasks", "bug.md"):           taskTypeTemplate("bug"),
+		filepath.Join(root, TaskerDirName, "templates", "tasks", "decision.md"):      taskTypeTemplate("decision"),
+		filepath.Join(root, TaskerDirName, "templates", "tasks", "documentation.md"): taskTypeTemplate("documentation"),
+		filepath.Join(root, TaskerDirName, "templates", "tasks", "feature.md"):       taskTypeTemplate("feature"),
+		filepath.Join(root, TaskerDirName, "templates", "tasks", "research.md"):      taskTypeTemplate("research"),
+		filepath.Join(root, TaskerDirName, "templates", "tasks", "review.md"):        taskTypeTemplate("review"),
 	}
 
 	for path, content := range files {

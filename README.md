@@ -1,35 +1,86 @@
 # Tasker
 
-Tasker is a CLI-first universal agent workspace protocol. The idea is simple: humans need documents to stay organized, and agents apparently need their own little paper trail too.
+Tasker is a CLI-first task workspace for human and AI collaboration.
 
- This project, was also done using Tasker.
+It turns work into a durable file-based protocol instead of a chat-only workflow. Every task gets its own folder, goal, instructions, handoff notes, result report, and machine-readable status so another person or another agent can continue the work without guessing what happened before.
 
-## Current V1 Scope
+Tasker is useful when you want:
 
-Implemented:
+- explicit task ownership and status
+- clean handoffs between humans and agents
+- task context that survives editor restarts, branch changes, and lost chat history
+- a simple workflow that lives inside a normal Git repository
+
+This project is also maintained with Tasker itself.
+
+## What Tasker Creates
+
+Running `tasker init` creates a `.tasker/` workspace plus an `AGENTS.md` file.
+
+Core workspace files:
+
+- `.tasker/START.md`: how an agent should begin work
+- `.tasker/instructions.md`: repository-wide rules
+- `.tasker/current/WORKSPACE.md`: current active task summary
+- `.tasker/current/FILES.md`: relevant files for the active task
+- `.tasker/current/CONTEXT.json`: machine-readable current task context
+- `.tasker/tasks/`: every task and subtask folder
+
+Each task folder contains:
+
+- `task.md`: title, metadata summary, and goal
+- `instructions.md`: task-specific rules
+- `declaration.md`: work-in-progress handoff
+- `result.md`: final summary
+- `meta.json`: task metadata
+- `status.json`: machine-readable status
+- `context.json`: task-local structured context
+- `children/`: child tasks
+- `sessions/`: session artifacts
+
+## Core Ideas
+
+### 1. Tasks are files, not chat state
+
+Tasker assumes work should be resumable from disk. The task folder is the source of truth.
+
+### 2. Parent-child task chains matter
+
+Child tasks live under a parent task and inherit context from that chain. When a task is checked out, Tasker writes the parent chain into the current workspace files so the next worker knows what to read.
+
+### 3. Checkout means task context, not only Git
+
+`tasker checkout <id>` updates `.tasker/current/*` for the selected task. If Git integration is enabled, it can also create or switch branches for that task.
+
+### 4. Git support is optional
+
+Tasker works without Git branch automation. If enabled, it can use one branch per task and write the current branch into workspace context.
+
+## Current Commands
+
+Tasker currently implements:
 
 - `tasker init`
-- `tasker checkout <id>`
-- `tasker instruction <id>`
-- `tasker instructions`
 - `tasker new [title]`
 - `tasker add [title]`
+- `tasker checkout <id>`
+- `tasker open <id>`
+- `tasker instruction <id>`
+- `tasker instructions`
 - `tasker meta <id>`
 - `tasker delete <id>`
-- `tasker open <id>`
 - `tasker tree`
 - `tasker status`
 - `tasker status <id>`
 - `tasker version`
 
-
-## Build
+## Installation And Build
 
 Requirements:
 
 - Go 1.22+
 
-Commands:
+Build locally:
 
 ```bash
 go mod tidy
@@ -50,28 +101,63 @@ VERSION=v0.1.0 COMMIT=local DATE=2026-06-29T00:00:00Z ./scripts/build.sh
 ./bin/tasker version
 ```
 
-## Notes
+Global install behavior:
 
-- Task IDs are global across the workspace.
-- `tasker instruction <id>` opens a task's `instructions.md`.
-- `tasker status` shows a workspace-wide task tree, including subtasks plus per-task status metadata such as type, agent, and child counts.
-- `tasker status <id>` shows details for one task plus its subtasks and handoff notes.
-- `tasker status` uses ANSI color and stronger section formatting when writing to an interactive terminal, and falls back to plain text when redirected.
-- `tasker checkout <id>` populates `.tasker/current/WORKSPACE.md`, `.tasker/current/FILES.md`, and `.tasker/current/CONTEXT.json` so the next agent has explicit workspace context.
-- When Git is enabled, `tasker checkout <id>` only auto-creates or reuses a branch if `git.checkout_branch: true` is set in `.tasker/config.yaml`.
-- `tasker checkout <id> --existing-branch <name>` links a task to an existing branch, and `--branch <name>` lets you override the generated task branch name.
-- Agent guidance expects child-task work to include reading the parent task chain for inherited context and constraints.
-- Child tasks are stored in each task's `children/` directory.
-- `tasker delete <id>` removes a leaf task, and requires `--recursive` for tasks that have children.
-- `tasker new` and `tasker add` support `--open task|instructions|declaration|result|meta` and `--no-open`.
-- `tasker add` accepts `--parent`, but can also infer the parent from the current task directory or `.tasker/current/CONTEXT.json`.
-- `tasker meta <id>` opens `meta.json` by default, and can apply validated updates with `--title` and `--type`.
-- Editor resolution now checks `.tasker/config.yaml` first, then falls back to `$EDITOR`.
+- `./scripts/install.sh` builds `bin/tasker` and symlinks it to `/opt/homebrew/bin/tasker`
+- override the install target with `TASKER_INSTALL_DIR=/some/path ./scripts/install.sh`
 
-Example config:
+## Quick Start
+
+Initialize Tasker in an existing repository:
+
+```bash
+tasker init
+```
+
+Create a top-level task:
+
+```bash
+tasker new "Add Git worktree support"
+```
+
+Create a task and immediately make it the current workspace:
+
+```bash
+tasker new -c "Write release checklist"
+```
+
+Create a task, check it out, and switch to its task branch:
+
+```bash
+tasker new -bc "Fix broken CLI status colors"
+```
+
+Create a child task under the current task:
+
+```bash
+tasker add "Document fallback behavior"
+```
+
+See the task tree:
+
+```bash
+tasker tree
+```
+
+See status for everything:
+
+```bash
+tasker status
+```
+
+## Configuration
+
+Tasker reads `.tasker/config.yaml`.
+
+Default config:
 
 ```yaml
-editor: "code -w"
+editor: ""
 
 git:
   enabled: false
@@ -81,14 +167,348 @@ git:
   branch_prefix: "task"
 ```
 
-Global install:
+Behavior notes:
 
-- `./scripts/install.sh` builds `bin/tasker` and symlinks it to `/opt/homebrew/bin/tasker`
-- override the target with `TASKER_INSTALL_DIR=/some/path ./scripts/install.sh`
+- `editor` is checked before `$EDITOR`
+- if neither is set, editor-opening commands print the target path instead
+- `git.checkout_branch: true` allows `tasker checkout <id>` to auto-create or reuse the generated branch
+- `git.branch_prefix` defaults to `task`
+
+Generated branch format:
+
+```text
+<branch_prefix>/<task-id>-<task-slug>
+```
+
+Example:
+
+```text
+task/013-automatical-checkout
+```
+
+## Command Guide
+
+### `tasker init`
+
+Initializes Tasker in the current repository.
+
+Behavior:
+
+- creates the `.tasker/` workspace directories if missing
+- creates starter templates like `AGENTS.md`, `.tasker/START.md`, and `.tasker/config.yaml`
+- creates editable task templates under `.tasker/templates/tasks/`
+- does not overwrite existing files that are already present
+
+Example:
+
+```bash
+tasker init
+```
+
+### `tasker new [title]`
+
+Creates a top-level task.
+
+Options:
+
+- `--type <type>`: task type, one of `bug`, `decision`, `documentation`, `feature`, `research`, `review`
+- `--open <target>`: open `task`, `instructions`, `declaration`, `result`, or `meta`
+- `--no-open`: create the task without opening an editor
+- `-c`, `--checkout`: create the task and set it as the current workspace without switching Git branches
+- `-b`, `--branch-checkout`: create the task, set it as current, and create or switch to its task branch
+
+Behavior:
+
+- if no title is given, Tasker uses `Untitled task`
+- if `--type` is omitted, Tasker keeps the default generic `task.md` structure
+- if `--type` is provided, Tasker uses `.tasker/templates/tasks/<type>.md`
+- IDs are global across the whole workspace, not only top-level tasks
+- `-c` updates `.tasker/current/WORKSPACE.md`, `.tasker/current/FILES.md`, and `.tasker/current/CONTEXT.json`
+- `-b` forces task-branch checkout even if `git.checkout_branch` is disabled in config
+- `tasker new -bc "Title"` works because Cobra accepts combined short flags
+
+Examples:
+
+```bash
+tasker new "Design status view"
+tasker new --type research "Investigate old document format"
+tasker new --open declaration "Refactor startup flow"
+tasker new --no-open "Write docs"
+tasker new -c "Prepare migration checklist"
+tasker new -bc "Implement automatic checkout"
+```
+
+### `tasker add [title]`
+
+Creates a child task under an existing task.
+
+Options:
+
+- `--parent <id>`: explicit parent task ID
+- `--type <type>`: task type
+- `--open <target>`: open `task`, `instructions`, `declaration`, `result`, or `meta`
+- `--no-open`: create the task without opening an editor
+
+Behavior:
+
+- if `--parent` is omitted, Tasker tries to infer the parent from the current directory or `.tasker/current/CONTEXT.json`
+- if `--type` is omitted, Tasker keeps the default generic `task.md` structure
+- if `--type` is provided, Tasker uses `.tasker/templates/tasks/<type>.md`
+- child tasks are written under `<parent>/children/`
+- IDs are still global
+
+Examples:
+
+```bash
+tasker add --parent 006 "Add tests for branch naming"
+tasker add "Split status output formatting"
+tasker add --type documentation --open instructions "Describe checkout behavior"
+```
+
+### `tasker checkout <id>`
+
+Sets the current task workspace and can also switch Git branches.
+
+Options:
+
+- `--branch <name>`: create or reuse this branch for the task
+- `--existing-branch <name>`: link the task to an already existing branch
+- `--no-branch`: update current workspace files without switching Git branches
+- `--print-path`: print the task directory path for shell wrappers
+
+Behavior:
+
+- always writes current task context into `.tasker/current/*`
+- includes parent task chain information for child tasks
+- if Git is enabled and `git.checkout_branch: true`, default checkout creates or switches to the generated task branch
+- `--branch` overrides the generated task branch name
+- `--existing-branch` fails if the branch does not exist
+- `--no-branch` cannot be combined with branch-selection options
+
+Examples:
+
+```bash
+tasker checkout 013
+tasker checkout 013 --no-branch
+tasker checkout 013 --branch feature/custom-name
+tasker checkout 013 --existing-branch feature/manual-link
+tasker checkout 013 --print-path
+```
+
+### `tasker open <id>`
+
+Opens a task's `task.md` in the configured editor.
+
+Behavior:
+
+- uses `.tasker/config.yaml` `editor` first
+- falls back to `$EDITOR`
+- prints the file path if no editor is configured or opening fails
+
+Example:
+
+```bash
+tasker open 013
+```
+
+### `tasker instruction <id>`
+
+Opens a task's `instructions.md`.
+
+Example:
+
+```bash
+tasker instruction 013
+```
+
+### `tasker instructions`
+
+Opens the project-wide `.tasker/instructions.md`.
+
+## Task Templates
+
+`tasker init` creates editable task templates in `.tasker/templates/tasks/`:
+
+- `default.md`
+- `bug.md`
+- `decision.md`
+- `documentation.md`
+- `feature.md`
+- `research.md`
+- `review.md`
+
+Tasker replaces these placeholders when it creates `task.md`:
+
+- `{{TITLE}}`
+- `{{ID}}`
+- `{{TYPE}}`
+- `{{CREATED_AT}}`
+
+If a template file is missing, Tasker falls back to its built-in default for that template.
+
+Example:
+
+```bash
+tasker instructions
+```
+
+### `tasker meta <id>`
+
+Opens or updates a task's metadata.
+
+Options:
+
+- `--title <title>`: update the task title
+- `--type <type>`: update the task type
+- `--open`: open `meta.json` after applying updates
+
+Behavior:
+
+- if you only run `tasker meta <id>`, it opens `meta.json`
+- if you update metadata without `--open`, it prints a confirmation and exits
+- renaming a task updates the metadata and the task folder slug
+
+Examples:
+
+```bash
+tasker meta 013
+tasker meta 013 --title "automatic checkout"
+tasker meta 013 --type documentation --open
+```
+
+### `tasker delete <id>`
+
+Deletes a task.
+
+Options:
+
+- `--recursive`: delete the task and all child tasks
+
+Behavior:
+
+- deleting a leaf task works directly
+- deleting a task with children fails unless `--recursive` is set
+
+Examples:
+
+```bash
+tasker delete 014
+tasker delete 006 --recursive
+```
+
+### `tasker tree`
+
+Prints the task hierarchy.
+
+Behavior:
+
+- top-level tasks are shown first
+- child tasks are indented underneath their parent
+- each line includes the task ID, title, and type
+
+Example:
+
+```bash
+tasker tree
+```
+
+### `tasker status [id]`
+
+Shows status output for the whole workspace or one task.
+
+Behavior with no ID:
+
+- prints the full task tree
+- includes task status, title, type, agent, and child count metadata
+
+Behavior with an ID:
+
+- shows one task in detail
+- includes status, type, agent, created time, started time, and path
+- shows subtasks
+- shows notes from `task.md`, `instructions.md`, `declaration.md`, and `result.md`
+
+Formatting behavior:
+
+- uses ANSI color when output is a terminal
+- disables color when `NO_COLOR` is set
+- disables color when `TERM=dumb`
+- falls back to plain text when redirected
+
+Examples:
+
+```bash
+tasker status
+tasker status 013
+NO_COLOR=1 tasker status
+```
+
+### `tasker version`
+
+Shows build version information.
+
+Example:
+
+```bash
+tasker version
+```
+
+## Typical Workflows
+
+### Solo development with explicit task history
+
+```bash
+tasker init
+tasker new -c "Refactor auth middleware"
+tasker status
+tasker open 001
+```
+
+Use this when you want lightweight task tracking inside a normal repository without adding a separate project management system.
+
+### Human-to-agent handoff
+
+```bash
+tasker new -c "Write migration plan"
+tasker instruction 001
+tasker status 001
+```
+
+Use this when a human defines the task and an agent continues the implementation from the on-disk task files.
+
+### Parent task with focused subtasks
+
+```bash
+tasker new -c "Ship status redesign"
+tasker add "Update rendering logic"
+tasker add "Document color behavior"
+tasker tree
+```
+
+Use this when one larger feature should be split into smaller units that still preserve shared context.
+
+### One branch per task
+
+```bash
+tasker new -bc "Add release automation"
+tasker checkout 002
+tasker checkout 003 --existing-branch feature/manual-branch
+```
+
+Use this when each task should have isolated Git work tied to its task ID and slug.
+
+## Practical Notes
+
+- Task IDs are zero-padded and global across the workspace.
+- Child tasks live under the parent task folder, not only in a flat global list.
+- `tasker checkout` is the command that refreshes `.tasker/current/*`.
+- `tasker new -c` and `tasker new -b` are shortcuts for creating a task and immediately making it active.
+- Tasker does not require Git branch automation to be useful.
+- Opening files depends on either `.tasker/config.yaml` `editor` or `$EDITOR`.
 
 ## Packaging
 
-- Tagged releases are configured through GoReleaser in `.goreleaser.yaml`
+- tagged releases are configured through `.goreleaser.yaml`
 - GitHub Actions release automation lives in `.github/workflows/release.yml`
 - Debian package generation is configured through GoReleaser NFPM
-- Maintainer release workflow is documented in `docs/releasing.md`
+- maintainer release workflow is documented in `docs/releasing.md`
