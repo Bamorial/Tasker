@@ -84,6 +84,7 @@ func renderWorkspaceMarkdown(root string, chain []Task, task *Task, input Curren
 	if len(chain) > 0 {
 		b.WriteString("- Read the parent task chain before changing code\n")
 	}
+	b.WriteString("- Do not create task folders manually under .tasker/tasks; use `tasker new`, `tasker add`, or `tasker import`\n")
 	b.WriteString("- Update declaration.md, result.md, and status.json for important progress\n\n")
 
 	b.WriteString("Relevant files:\n")
@@ -130,6 +131,7 @@ func currentWorkspaceFiles(chain []Task, task *Task) []string {
 		task.ResultFile,
 		task.MetaFile,
 		filepath.Join(task.Path, "status.json"),
+		filepath.Join(task.Path, "sessions", "index.json"),
 	}
 
 	for _, parent := range chain {
@@ -140,6 +142,7 @@ func currentWorkspaceFiles(chain []Task, task *Task) []string {
 			parent.ResultFile,
 			parent.MetaFile,
 			filepath.Join(parent.Path, "status.json"),
+			filepath.Join(parent.Path, "sessions", "index.json"),
 		)
 	}
 

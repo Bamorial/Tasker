@@ -726,7 +726,13 @@ HANDOFF
 
 REVIEW
 
-COMPLETED
+BLOCKED
+
+AWAITING_ACTION
+
+IN_PROGRESS
+
+DONE
 
 
 
@@ -734,7 +740,7 @@ status.json example:
 
 
 {
- "status":"running",
+ "status":"DONE",
  "agent":"unknown",
  "started":"date"
 }

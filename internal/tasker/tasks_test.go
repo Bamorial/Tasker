@@ -10,6 +10,46 @@ import (
 	"time"
 )
 
+func setEnvForTest(t *testing.T, name, value string) {
+	t.Helper()
+
+	oldValue, hadValue := os.LookupEnv(name)
+	if err := os.Setenv(name, value); err != nil {
+		t.Fatalf("Setenv %s: %v", name, err)
+	}
+
+	t.Cleanup(func() {
+		var err error
+		if hadValue {
+			err = os.Setenv(name, oldValue)
+		} else {
+			err = os.Unsetenv(name)
+		}
+		if err != nil {
+			t.Fatalf("restore env %s: %v", name, err)
+		}
+	})
+}
+
+func unsetEnvForTest(t *testing.T, name string) {
+	t.Helper()
+
+	oldValue, hadValue := os.LookupEnv(name)
+	if err := os.Unsetenv(name); err != nil {
+		t.Fatalf("Unsetenv %s: %v", name, err)
+	}
+
+	t.Cleanup(func() {
+		var err error
+		if hadValue {
+			err = os.Setenv(name, oldValue)
+		}
+		if err != nil {
+			t.Fatalf("restore env %s: %v", name, err)
+		}
+	})
+}
+
 func TestGetTaskIncludesInstructionsFile(t *testing.T) {
 	root := t.TempDir()
 	if err := InitializeWorkspace(root); err != nil {
@@ -41,6 +81,38 @@ func TestGetTaskIncludesInstructionsFile(t *testing.T) {
 
 	if _, err := os.Stat(task.InstructionsFile); err != nil {
 		t.Fatalf("expected instructions file to exist: %v", err)
+	}
+}
+
+func TestGetTaskIgnoresUnrelatedInvalidTaskStatus(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	first, err := CreateTask(root, CreateTaskInput{Title: "Legacy", Type: "feature"})
+	if err != nil {
+		t.Fatalf("CreateTask first: %v", err)
+	}
+	second, err := CreateTask(root, CreateTaskInput{Title: "Target", Type: "feature"})
+	if err != nil {
+		t.Fatalf("CreateTask second: %v", err)
+	}
+
+	if err := writeJSON(filepath.Join(first.Path, "status.json"), TaskStatus{
+		Status:  "completed",
+		Agent:   "worker",
+		Started: "2026-06-30T10:00:00+03:00",
+	}); err != nil {
+		t.Fatalf("write legacy status: %v", err)
+	}
+
+	task, err := GetTask(root, second.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if task.Meta.ID != second.ID {
+		t.Fatalf("expected task %s, got %s", second.ID, task.Meta.ID)
 	}
 }
 
@@ -79,7 +151,40 @@ func TestInitializeWorkspaceCreatesTaskTemplates(t *testing.T) {
 	}
 }
 
-func TestCreateTaskUsesDefaultTemplateWhenTypeOmitted(t *testing.T) {
+func TestInitializeWorkspaceWritesAgentTaskCreationRule(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	for _, path := range []string{
+		filepath.Join(root, "AGENTS.md"),
+		filepath.Join(root, TaskerDirName, "START.md"),
+		filepath.Join(root, TaskerDirName, "agent.md"),
+	} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile %s: %v", path, err)
+		}
+
+		content := string(data)
+		for _, want := range []string{
+			"tasker new",
+			"tasker add",
+			"tasker import",
+		} {
+			if !strings.Contains(content, want) {
+				t.Fatalf("expected %s to include %q, got:\n%s", path, want, content)
+			}
+		}
+		if !strings.Contains(strings.ToLower(content), "do not manually create task folders") &&
+			!strings.Contains(strings.ToLower(content), "never create task folders") {
+			t.Fatalf("expected %s to include a manual task creation prohibition, got:\n%s", path, content)
+		}
+	}
+}
+
+func TestCreateTaskUsesFeatureTemplateWhenTypeOmitted(t *testing.T) {
 	root := t.TempDir()
 	if err := InitializeWorkspace(root); err != nil {
 		t.Fatalf("InitializeWorkspace: %v", err)
@@ -96,14 +201,17 @@ func TestCreateTaskUsesDefaultTemplateWhenTypeOmitted(t *testing.T) {
 	}
 
 	content := string(data)
-	if !strings.Contains(content, "# Untyped Task") {
-		t.Fatalf("expected default template to include title, got:\n%s", content)
-	}
-	if !strings.Contains(content, "## Goal") {
-		t.Fatalf("expected default template to include goal section, got:\n%s", content)
-	}
-	if strings.Contains(content, "[write here]") {
-		t.Fatalf("expected default template to preserve legacy generic body, got:\n%s", content)
+	for _, want := range []string{
+		"# Feature",
+		"ID: "+created.ID,
+		"Type: feature",
+		"## Goal",
+		"## Details",
+		"## Acceptance",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("expected implicit feature template to include %q, got:\n%s", want, content)
+		}
 	}
 }
 
@@ -172,6 +280,458 @@ func TestCreateTaskUsesCustomizedWorkspaceTemplate(t *testing.T) {
 		if !strings.Contains(content, want) {
 			t.Fatalf("expected customized template to include %q, got:\n%s", want, content)
 		}
+	}
+}
+
+func TestCreateTaskUsesCustomizedFeatureTemplateWhenTypeOmitted(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	customTemplate := "# Workspace Feature Default\n\nShip {{TITLE}} as {{ID}}.\n"
+	templatePath := filepath.Join(root, TaskerDirName, "templates", "tasks", "feature.md")
+	if err := os.WriteFile(templatePath, []byte(customTemplate), 0o644); err != nil {
+		t.Fatalf("WriteFile custom template: %v", err)
+	}
+
+	created, err := CreateTask(root, CreateTaskInput{Title: "Launch API"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	data, err := os.ReadFile(created.TaskFile)
+	if err != nil {
+		t.Fatalf("ReadFile task.md: %v", err)
+	}
+
+	content := string(data)
+	for _, want := range []string{
+		"# Workspace Feature Default",
+		"Ship Launch API as " + created.ID + ".",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("expected implicit feature template to use customized workspace template and include %q, got:\n%s", want, content)
+		}
+	}
+}
+
+func TestCreateTaskStoresDetectedCodexSession(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	sessionID := "019f18b6-d117-7de2-ae23-4aa2ffaff8a1"
+	setEnvForTest(t, "CODEX_THREAD_ID", sessionID)
+
+	created, err := CreateTask(root, CreateTaskInput{Title: "Track session", Type: "feature"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	task, err := GetTask(root, created.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+
+	if len(task.Status.Sessions) != 1 {
+		t.Fatalf("expected 1 stored session, got %#v", task.Status.Sessions)
+	}
+
+	session := task.Status.Sessions[0]
+	if session.Agent != "codex" || session.ID != sessionID {
+		t.Fatalf("unexpected stored session: %#v", session)
+	}
+	if session.ResumeCommand != "codex resume "+sessionID {
+		t.Fatalf("expected resume command to be populated, got %#v", session)
+	}
+	if session.ForkCommand != "codex fork "+sessionID {
+		t.Fatalf("expected fork command to be populated, got %#v", session)
+	}
+
+	var index TaskSessionIndex
+	if err := readJSON(filepath.Join(created.Path, "sessions", "index.json"), &index); err != nil {
+		t.Fatalf("readJSON session index: %v", err)
+	}
+	if len(index.Sessions) != 1 || index.Sessions[0].ID != sessionID {
+		t.Fatalf("expected session index to mirror stored session, got %#v", index)
+	}
+}
+
+func TestCreateTaskStoresExplicitSessionMetadata(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	unsetEnvForTest(t, "CODEX_THREAD_ID")
+	setEnvForTest(t, "TASKER_SESSION_ID", "session-123")
+	setEnvForTest(t, "TASKER_SESSION_AGENT", "claude")
+	setEnvForTest(t, "TASKER_SESSION_RESUME_COMMAND", "claude resume session-123")
+	setEnvForTest(t, "TASKER_SESSION_FORK_COMMAND", "claude fork session-123")
+
+	created, err := CreateTask(root, CreateTaskInput{Title: "Track explicit session", Type: "feature"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	task, err := GetTask(root, created.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+
+	if len(task.Status.Sessions) != 1 {
+		t.Fatalf("expected 1 stored session, got %#v", task.Status.Sessions)
+	}
+
+	session := task.Status.Sessions[0]
+	if session.Agent != "claude" || session.ID != "session-123" {
+		t.Fatalf("unexpected stored session: %#v", session)
+	}
+	if session.ResumeCommand != "claude resume session-123" || session.ForkCommand != "claude fork session-123" {
+		t.Fatalf("expected explicit commands to be preserved, got %#v", session)
+	}
+}
+
+func TestStoreTaskSessionPersistsStatusAndIndex(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	unsetEnvForTest(t, "CODEX_THREAD_ID")
+	unsetEnvForTest(t, "TASKER_SESSION_ID")
+	unsetEnvForTest(t, "TASKER_SESSION_AGENT")
+	unsetEnvForTest(t, "TASKER_SESSION_RESUME_COMMAND")
+	unsetEnvForTest(t, "TASKER_SESSION_FORK_COMMAND")
+
+	created, err := CreateTask(root, CreateTaskInput{Title: "Store session", Type: "feature"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	task, err := GetTask(root, created.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+
+	session := newCodexTaskSession("session-123", "codex exec", time.Date(2026, 6, 30, 14, 0, 0, 0, time.UTC))
+	if err := StoreTaskSession(task, session); err != nil {
+		t.Fatalf("StoreTaskSession: %v", err)
+	}
+
+	reloaded, err := GetTask(root, created.ID)
+	if err != nil {
+		t.Fatalf("GetTask reload: %v", err)
+	}
+	if len(reloaded.Status.Sessions) != 1 {
+		t.Fatalf("expected one stored session, got %#v", reloaded.Status.Sessions)
+	}
+	if reloaded.Status.Sessions[0].ID != "session-123" {
+		t.Fatalf("expected persisted stored session, got %#v", reloaded.Status.Sessions)
+	}
+
+	var index TaskSessionIndex
+	if err := readJSON(filepath.Join(created.Path, "sessions", "index.json"), &index); err != nil {
+		t.Fatalf("readJSON index: %v", err)
+	}
+	if len(index.Sessions) != 1 || index.Sessions[0].ID != "session-123" {
+		t.Fatalf("expected session index to contain stored session, got %#v", index)
+	}
+}
+
+func TestDoTaskStoresHeadlessCodexSession(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	unsetEnvForTest(t, "CODEX_THREAD_ID")
+	unsetEnvForTest(t, "TASKER_SESSION_ID")
+	unsetEnvForTest(t, "TASKER_SESSION_AGENT")
+	unsetEnvForTest(t, "TASKER_SESSION_RESUME_COMMAND")
+	unsetEnvForTest(t, "TASKER_SESSION_FORK_COMMAND")
+
+	created, err := CreateTask(root, CreateTaskInput{Title: "Headless", Type: "feature"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	originalExecCommand := execCommand
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		helperArgs := append([]string{"-test.run=TestHelperProcessHeadlessCodex", "--", name}, args...)
+		cmd := exec.Command(os.Args[0], helperArgs...)
+		cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
+		return cmd
+	}
+	t.Cleanup(func() {
+		execCommand = originalExecCommand
+	})
+
+	var stdout strings.Builder
+	var stderr strings.Builder
+	if err := DoTask(root, created.ID, &stdout, &stderr); err != nil {
+		t.Fatalf("DoTask: %v", err)
+	}
+
+	task, err := GetTask(root, created.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if len(task.Status.Sessions) != 1 {
+		t.Fatalf("expected one stored session, got %#v", task.Status.Sessions)
+	}
+	if task.Status.Status != "DONE" {
+		t.Fatalf("expected successful headless run to finish as DONE when no final status is written, got %#v", task.Status)
+	}
+	if task.Status.Sessions[0].ID != "session-headless-123" {
+		t.Fatalf("expected stored headless session ID, got %#v", task.Status.Sessions[0])
+	}
+	if !strings.Contains(stdout.String(), "Started Codex session: session-headless-123") {
+		t.Fatalf("expected command output to include session id, got %q", stdout.String())
+	}
+}
+
+func TestDoTaskShowsProgressAndSuppressesStdinNotice(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	unsetEnvForTest(t, "CODEX_THREAD_ID")
+	unsetEnvForTest(t, "TASKER_SESSION_ID")
+	unsetEnvForTest(t, "TASKER_SESSION_AGENT")
+	unsetEnvForTest(t, "TASKER_SESSION_RESUME_COMMAND")
+	unsetEnvForTest(t, "TASKER_SESSION_FORK_COMMAND")
+
+	created, err := CreateTask(root, CreateTaskInput{Title: "Progress", Type: "feature"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	originalExecCommand := execCommand
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		helperArgs := append([]string{"-test.run=TestHelperProcessHeadlessCodexWithStderrNotice", "--", name}, args...)
+		cmd := exec.Command(os.Args[0], helperArgs...)
+		cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS_STDERR_NOTICE=1")
+		return cmd
+	}
+	originalTicker := taskerDoProgressTicker
+	taskerDoProgressTicker = func(d time.Duration) *time.Ticker {
+		return time.NewTicker(5 * time.Millisecond)
+	}
+	t.Cleanup(func() {
+		execCommand = originalExecCommand
+		taskerDoProgressTicker = originalTicker
+	})
+
+	var stdout strings.Builder
+	var stderr strings.Builder
+	if err := DoTask(root, created.ID, &stdout, &stderr); err != nil {
+		t.Fatalf("DoTask: %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "Tasker do is working.") {
+		t.Fatalf("expected progress output, got %q", stdout.String())
+	}
+	if strings.Contains(stderr.String(), "Reading additional input from stdin") {
+		t.Fatalf("expected stdin notice to be suppressed, got %q", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Started Codex session: session-headless-789") {
+		t.Fatalf("expected stored session output, got %q", stdout.String())
+	}
+}
+
+func TestHelperProcessHeadlessCodex(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+
+	fmt.Fprintln(os.Stdout, `{"type":"session_meta","payload":{"session_id":"session-headless-123","id":"session-headless-123"}}`)
+	fmt.Fprintln(os.Stdout, `{"type":"event_msg","payload":{"type":"agent_message","message":"Working headlessly"}}`)
+	fmt.Fprintln(os.Stdout, `{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Finished task"}]}}`)
+	os.Exit(0)
+}
+
+func TestHelperProcessHeadlessCodexWithStderrNotice(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS_STDERR_NOTICE") != "1" {
+		return
+	}
+
+	fmt.Fprintln(os.Stderr, "Reading additional input from stdin...")
+	time.Sleep(20 * time.Millisecond)
+	fmt.Fprintln(os.Stdout, `{"type":"session_meta","payload":{"session_id":"session-headless-789","id":"session-headless-789"}}`)
+	fmt.Fprintln(os.Stdout, `{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Finished with loader"}]}}`)
+	os.Exit(0)
+}
+
+func TestHelperProcessHeadlessCodexWithoutSessionMeta(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS_NO_SESSION_META") != "1" {
+		return
+	}
+
+	fmt.Fprintln(os.Stdout, `{"type":"event_msg","payload":{"type":"agent_message","message":"Working headlessly"}}`)
+	fmt.Fprintln(os.Stdout, `{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Finished task"}]}}`)
+	os.Exit(0)
+}
+
+func TestDoTaskFallsBackToPersistedCodexExecSession(t *testing.T) {
+	root := t.TempDir()
+	unsetEnvForTest(t, "CODEX_THREAD_ID")
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	created, err := CreateTask(root, CreateTaskInput{Title: "Headless persisted session", Type: "feature"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	homeDir := filepath.Join(t.TempDir(), "home")
+	if err := os.MkdirAll(homeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll home: %v", err)
+	}
+	setEnvForTest(t, "HOME", homeDir)
+
+	sessionID := "session-from-file-456"
+	sessionPath := filepath.Join(homeDir, ".codex", "sessions", "2026", "06", "30", "rollout-2026-06-30T20-40-29-"+sessionID+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(sessionPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll session dir: %v", err)
+	}
+	sessionMeta := fmt.Sprintf(
+		"{\"timestamp\":\"2026-06-30T17:40:29.776Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"%s\",\"id\":\"%s\",\"timestamp\":\"9999-06-30T17:40:29Z\",\"cwd\":\"%s\",\"originator\":\"codex_exec\",\"source\":\"exec\"}}\n",
+		sessionID,
+		sessionID,
+		root,
+	)
+	if err := os.WriteFile(sessionPath, []byte(sessionMeta), 0o644); err != nil {
+		t.Fatalf("WriteFile session meta: %v", err)
+	}
+
+	originalExecCommand := execCommand
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		cs := append([]string{"-test.run=TestHelperProcessHeadlessCodexWithoutSessionMeta", "--"}, args...)
+		cmd := exec.Command(os.Args[0], cs...)
+		cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS_NO_SESSION_META=1")
+		return cmd
+	}
+	t.Cleanup(func() {
+		execCommand = originalExecCommand
+	})
+
+	var stdout strings.Builder
+	var stderr strings.Builder
+	if err := DoTask(root, created.ID, &stdout, &stderr); err != nil {
+		t.Fatalf("DoTask: %v", err)
+	}
+
+	task, err := GetTask(root, created.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if len(task.Status.Sessions) != 1 {
+		t.Fatalf("expected one stored session, got %#v", task.Status.Sessions)
+	}
+	if task.Status.Sessions[0].ID != sessionID {
+		t.Fatalf("expected stored persisted session ID, got %#v", task.Status.Sessions[0])
+	}
+	if !strings.Contains(stdout.String(), "Started Codex session: "+sessionID) {
+		t.Fatalf("expected command output to include fallback session id, got %q", stdout.String())
+	}
+}
+
+func TestSessionsForActionFiltersByAvailableCommand(t *testing.T) {
+	task := &Task{
+		Meta: TaskMeta{ID: "018"},
+		Status: TaskStatus{
+			Sessions: []TaskSession{
+				{Agent: "codex", ID: "resume-only", ResumeCommand: "codex resume resume-only"},
+				{Agent: "claude", ID: "fork-only", ForkCommand: "claude fork fork-only"},
+				{Agent: "noop", ID: "none"},
+			},
+		},
+	}
+
+	resumeSessions := SessionsForAction(task, AgentSessionResume)
+	if len(resumeSessions) != 1 || resumeSessions[0].ID != "resume-only" {
+		t.Fatalf("expected only resume-capable session, got %#v", resumeSessions)
+	}
+
+	forkSessions := SessionsForAction(task, AgentSessionFork)
+	if len(forkSessions) != 1 || forkSessions[0].ID != "fork-only" {
+		t.Fatalf("expected only fork-capable session, got %#v", forkSessions)
+	}
+}
+
+func TestSelectTaskSessionReturnsSingleMatchWithoutPrompt(t *testing.T) {
+	task := &Task{
+		Meta: TaskMeta{ID: "018"},
+		Status: TaskStatus{
+			Sessions: []TaskSession{
+				{Agent: "codex", ID: "one", ResumeCommand: "codex resume one"},
+			},
+		},
+	}
+
+	session, err := SelectTaskSession(task, AgentSessionResume, nil, nil)
+	if err != nil {
+		t.Fatalf("SelectTaskSession: %v", err)
+	}
+	if session.ID != "one" {
+		t.Fatalf("expected session one, got %#v", session)
+	}
+}
+
+func TestSelectTaskSessionPromptsForMultipleMatches(t *testing.T) {
+	task := &Task{
+		Meta: TaskMeta{ID: "018"},
+		Status: TaskStatus{
+			Sessions: []TaskSession{
+				{Agent: "codex", ID: "one", ResumeCommand: "codex resume one"},
+				{Agent: "claude", ID: "two", ResumeCommand: "claude resume two"},
+			},
+		},
+	}
+
+	in, err := os.CreateTemp(t.TempDir(), "session-choice-in")
+	if err != nil {
+		t.Fatalf("CreateTemp input: %v", err)
+	}
+	if _, err := in.WriteString("2\n"); err != nil {
+		t.Fatalf("WriteString input: %v", err)
+	}
+	if _, err := in.Seek(0, 0); err != nil {
+		t.Fatalf("Seek input: %v", err)
+	}
+
+	out, err := os.CreateTemp(t.TempDir(), "session-choice-out")
+	if err != nil {
+		t.Fatalf("CreateTemp output: %v", err)
+	}
+
+	session, err := SelectTaskSession(task, AgentSessionResume, in, out)
+	if err != nil {
+		t.Fatalf("SelectTaskSession: %v", err)
+	}
+	if session.ID != "two" {
+		t.Fatalf("expected session two, got %#v", session)
+	}
+}
+
+func TestSelectTaskSessionErrorsWithoutPromptIO(t *testing.T) {
+	task := &Task{
+		Meta: TaskMeta{ID: "018"},
+		Status: TaskStatus{
+			Sessions: []TaskSession{
+				{Agent: "codex", ID: "one", ResumeCommand: "codex resume one"},
+				{Agent: "claude", ID: "two", ResumeCommand: "claude resume two"},
+			},
+		},
+	}
+
+	if _, err := SelectTaskSession(task, AgentSessionResume, nil, nil); err == nil {
+		t.Fatal("expected multiple-session selection without IO to fail")
 	}
 }
 
@@ -558,7 +1118,7 @@ func TestTaskStatusesShowsTreeAndTaskMetadata(t *testing.T) {
 	}
 
 	if !strings.Contains(rows[0], parent.ID) ||
-		!strings.Contains(rows[0], "[IN_PROGRESS]") ||
+		!strings.Contains(rows[0], "[IN PROGRESS]") ||
 		!strings.Contains(rows[0], "Parent") ||
 		!strings.Contains(rows[0], "agent=planner") ||
 		!strings.Contains(rows[0], "1 child") {
@@ -634,6 +1194,24 @@ func TestTaskStatusDetailsIncludesSubtasks(t *testing.T) {
 		t.Fatalf("write parent result file: %v", err)
 	}
 
+	if err := writeJSON(filepath.Join(parent.Path, "status.json"), TaskStatus{
+		Status:  "NEW",
+		Agent:   "unknown",
+		Started: "2026-06-29T18:55:00+03:00",
+		Sessions: []TaskSession{
+			{
+				Agent:         "codex",
+				ID:            "019f18b6-d117-7de2-ae23-4aa2ffaff8a1",
+				Source:        "CODEX_THREAD_ID",
+				RecordedAt:    "2026-06-29T18:55:00+03:00",
+				ResumeCommand: "codex resume 019f18b6-d117-7de2-ae23-4aa2ffaff8a1",
+				ForkCommand:   "codex fork 019f18b6-d117-7de2-ae23-4aa2ffaff8a1",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("write parent status with session: %v", err)
+	}
+
 	rows, err := TaskStatusDetails(root, parent.ID)
 	if err != nil {
 		t.Fatalf("TaskStatusDetails: %v", err)
@@ -643,8 +1221,12 @@ func TestTaskStatusDetailsIncludesSubtasks(t *testing.T) {
 	for _, want := range []string{
 		fmt.Sprintf("Task %s: Parent", parent.ID),
 		"Status   [NEW]",
+		"Sessions",
+		"  codex 019f18b6-d117-7de2-ae23-4aa2ffaff8a1",
+		"    resume  codex resume 019f18b6-d117-7de2-ae23-4aa2ffaff8a1",
+		"    fork    codex fork 019f18b6-d117-7de2-ae23-4aa2ffaff8a1",
 		"Subtasks",
-		fmt.Sprintf("  %s  [IN_PROGRESS]", child.ID),
+		fmt.Sprintf("  %s  [IN PROGRESS]", child.ID),
 		fmt.Sprintf("    %s  [DONE]", grandchild.ID),
 		"Notes",
 		"  Goal",
@@ -702,6 +1284,79 @@ func TestValidTaskTypesSorted(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("expected task type %d to be %q, got %q", i, want[i], got[i])
 		}
+	}
+}
+
+func TestValidTaskStatusesSorted(t *testing.T) {
+	got := ValidTaskStatuses()
+	want := []string{
+		"AWAITING_ACTION",
+		"BLOCKED",
+		"DONE",
+		"HANDOFF",
+		"IN_PROGRESS",
+		"NEW",
+		"PLANNED",
+		"REVIEW",
+		"RUNNING",
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("expected %d task statuses, got %d", len(want), len(got))
+	}
+
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("expected task status %d to be %q, got %q", i, want[i], got[i])
+		}
+	}
+}
+
+func TestTaskStatusesRejectInvalidStatus(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	task, err := CreateTask(root, CreateTaskInput{Title: "Broken", Type: "feature"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	if err := writeJSON(filepath.Join(task.Path, "status.json"), TaskStatus{
+		Status:  "shipped",
+		Agent:   "worker",
+		Started: "2026-06-30T10:00:00+03:00",
+	}); err != nil {
+		t.Fatalf("write status: %v", err)
+	}
+
+	if _, err := TaskStatuses(root); err == nil || !strings.Contains(err.Error(), `invalid status "SHIPPED"`) {
+		t.Fatalf("expected invalid status error, got %v", err)
+	}
+}
+
+func TestTaskStatusesRejectCompletedStatus(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	task, err := CreateTask(root, CreateTaskInput{Title: "Legacy", Type: "feature"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	if err := writeJSON(filepath.Join(task.Path, "status.json"), TaskStatus{
+		Status:  "completed",
+		Agent:   "worker",
+		Started: "2026-06-30T10:00:00+03:00",
+	}); err != nil {
+		t.Fatalf("write status: %v", err)
+	}
+
+	if _, err := TaskStatuses(root); err == nil || !strings.Contains(err.Error(), `invalid status "COMPLETED"`) {
+		t.Fatalf("expected completed status error, got %v", err)
 	}
 }
 
@@ -932,6 +1587,7 @@ func TestCheckoutTaskUpdatesCurrentWorkspace(t *testing.T) {
 		fmt.Sprintf("- %s Child Task", child.ID),
 		fmt.Sprintf("- %s Parent Task", parent.ID),
 		"Read the parent task chain before changing code",
+		"Do not create task folders manually under .tasker/tasks; use `tasker new`, `tasker add`, or `tasker import`",
 	} {
 		if !strings.Contains(workspace, want) {
 			t.Fatalf("expected workspace to include %q, got:\n%s", want, workspace)

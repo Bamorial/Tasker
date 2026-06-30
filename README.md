@@ -38,6 +38,12 @@ Each task folder contains:
 - `children/`: child tasks
 - `sessions/`: session artifacts
 
+When Tasker detects an active agent session while creating a task, it stores a machine-readable session index at `sessions/index.json` and mirrors that session metadata into `status.json`.
+
+Tasker recognizes these task status values in `status.json`: `NEW`, `PLANNED`, `RUNNING`, `IN_PROGRESS`, `HANDOFF`, `AWAITING_ACTION`, `REVIEW`, `BLOCKED`, and `DONE`.
+
+Agents should not create task folders manually under `.tasker/tasks/`. When a new task is needed, use `tasker new`, `tasker add`, or `tasker import` so Tasker can keep metadata, workspace state, and session tracking consistent.
+
 ## Core Ideas
 
 ### 1. Tasks are files, not chat state
@@ -66,7 +72,9 @@ Tasker currently implements:
 - `tasker import [path]`
 - `tasker import template`
 - `tasker checkout <id>`
+- `tasker do <id>`
 - `tasker open <id>`
+- `tasker resume <id>`
 - `tasker instruction <id>`
 - `tasker instructions`
 - `tasker meta <id>`
@@ -74,7 +82,10 @@ Tasker currently implements:
 - `tasker tree`
 - `tasker status`
 - `tasker status <id>`
+- `tasker tui`
 - `tasker version`
+
+Running `tasker` with no arguments prints `Hello!` on the first line and then shows the root help output.
 
 ## Installation And Build
 
@@ -171,6 +182,12 @@ See status for everything:
 tasker status
 ```
 
+Open the terminal UI:
+
+```bash
+tasker tui
+```
+
 ## Configuration
 
 Tasker reads `.tasker/config.yaml`.
@@ -243,7 +260,7 @@ Options:
 Behavior:
 
 - if no title is given, Tasker uses `Untitled task`
-- if `--type` is omitted, Tasker keeps the default generic `task.md` structure
+- if `--type` is omitted, Tasker defaults the task type to `feature` and uses `.tasker/templates/tasks/feature.md`
 - if `--type` is provided, Tasker uses `.tasker/templates/tasks/<type>.md`
 - IDs are global across the whole workspace, not only top-level tasks
 - `-c` updates `.tasker/current/WORKSPACE.md`, `.tasker/current/FILES.md`, and `.tasker/current/CONTEXT.json`
@@ -275,7 +292,7 @@ Options:
 Behavior:
 
 - if `--parent` is omitted, Tasker tries to infer the parent from the current directory or `.tasker/current/CONTEXT.json`
-- if `--type` is omitted, Tasker keeps the default generic `task.md` structure
+- if `--type` is omitted, Tasker defaults the task type to `feature` and uses `.tasker/templates/tasks/feature.md`
 - if `--type` is provided, Tasker uses `.tasker/templates/tasks/<type>.md`
 - child tasks are written under `<parent>/children/`
 - IDs are still global
@@ -377,6 +394,32 @@ tasker checkout 013 --existing-branch feature/manual-link
 tasker checkout 013 --print-path
 ```
 
+### `tasker tui`
+
+Opens the native Tasker terminal UI.
+
+Behavior:
+
+- loads tasks, status counts, and the current workspace directly from `internal/tasker`
+- shows dashboard, task explorer, current workspace, and jobs views
+- supports keyboard-driven `new`, `add`, `meta`, `checkout`, `import`, `import template`, `delete`, `do`, `resume`, and `fork` flows
+- uses external subprocesses only for editor launches and stored session resume/fork commands
+- refreshes the task tree, current workspace, and detail panes after mutating actions
+
+Key workflows:
+
+- `tab` and `shift+tab`: switch views
+- `/`: focus the task filter
+- `S` and `T`: cycle status and type filters
+- `n`, `a`, `m`, `c`, `u`, `I`, `d`, `e`, `x`, `s`, `f`: open action flows
+- `?`: show in-app help
+
+Example:
+
+```bash
+tasker tui
+```
+
 ### `tasker open <id>`
 
 Opens a task's `task.md` in the configured editor.
@@ -391,6 +434,52 @@ Example:
 
 ```bash
 tasker open 013
+```
+
+### `tasker resume <id>`
+
+Resumes or forks a stored agent session for a task.
+
+Options:
+
+- `-f`, `--fork`: fork the stored session instead of resuming it
+
+Behavior:
+
+- reads stored sessions from the task's `status.json`
+- uses the stored resume command by default
+- uses the stored fork command when `-f` is passed
+- launches the selected session command attached to the current terminal
+- prompts you to choose a session when multiple stored sessions match the requested action
+
+Examples:
+
+```bash
+tasker resume 018
+tasker resume -f 018
+```
+
+### `tasker do <id>`
+
+Runs a task in a new headless Codex session and stores the created session on the task.
+
+Behavior:
+
+- refreshes `.tasker/current/*` for the target task
+- marks the task `RUNNING` before the headless session starts
+- runs `codex exec` from the repository root in headless mode
+- shows a lightweight dot-based loading line while the headless run is quiet
+- suppresses the noisy `Reading additional input from stdin...` notice from the underlying exec process
+- captures the new session ID from the machine-readable exec stream when available
+- falls back to the persisted `~/.codex/sessions` metadata for matching `codex_exec` runs when the stream does not expose `session_meta`
+- stores the session in both `status.json` and `sessions/index.json`
+- preserves any final task status written by the agent, and otherwise promotes the successful run to `DONE`
+- leaves the task resumable later with `tasker resume <id>`
+
+Example:
+
+```bash
+tasker do 022
 ```
 
 ### `tasker instruction <id>`
@@ -508,6 +597,7 @@ Behavior with an ID:
 
 - shows one task in detail
 - includes status, type, agent, created time, started time, and path
+- includes stored agent session IDs plus resume or fork commands when known
 - shows subtasks
 - shows notes from `task.md`, `instructions.md`, `declaration.md`, and `result.md`
 
@@ -588,6 +678,10 @@ Use this when each task should have isolated Git work tied to its task ID and sl
 - `tasker new -c` and `tasker new -b` are shortcuts for creating a task and immediately making it active.
 - Tasker does not require Git branch automation to be useful.
 - Opening files depends on either `.tasker/config.yaml` `editor` or `$EDITOR`.
+- If `CODEX_THREAD_ID` is present, new tasks store it and show `codex resume <id>` and `codex fork <id>` in `tasker status <id>`.
+- `tasker do <id>` starts a fresh headless `codex exec` run and stores its session ID directly from the exec event stream.
+- `tasker resume <id>` uses the stored session commands and prompts when more than one session can be resumed or forked.
+- For other agents, you can inject session metadata with `TASKER_SESSION_ID`, `TASKER_SESSION_AGENT`, `TASKER_SESSION_RESUME_COMMAND`, and `TASKER_SESSION_FORK_COMMAND`.
 
 ## Packaging
 

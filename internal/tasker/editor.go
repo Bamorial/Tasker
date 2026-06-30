@@ -8,19 +8,26 @@ import (
 )
 
 func OpenInEditor(path string) error {
-	editor, err := ResolveEditor(".")
+	cmd, err := EditorCommand(".", path)
 	if err != nil {
 		return err
 	}
-	if editor == "" {
-		return fmt.Errorf("no editor configured; set .tasker/config.yaml `editor` or export EDITOR")
-	}
-
-	cmd := exec.Command("sh", "-c", editor+" \"$1\"", "tasker-editor", path)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func EditorCommand(start, path string) (*exec.Cmd, error) {
+	editor, err := ResolveEditor(start)
+	if err != nil {
+		return nil, err
+	}
+	if editor == "" {
+		return nil, fmt.Errorf("no editor configured; set .tasker/config.yaml `editor` or export EDITOR")
+	}
+
+	return exec.Command("sh", "-c", editor+" \"$1\"", "tasker-editor", path), nil
 }
 
 func ResolveEditor(start string) (string, error) {

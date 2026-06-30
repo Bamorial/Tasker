@@ -18,6 +18,8 @@ All important communication must happen through:
 - result.md
 - status.json
 
+Never create task folders or files manually under .tasker/tasks. Use tasker new, tasker add, or tasker import.
+
 Never leave undocumented changes.
 `
 }
@@ -45,6 +47,11 @@ Agent communication:
 - declaration.md is the working handoff
 - result.md is the final report
 - status.json is the machine-readable state
+
+Task creation rule:
+
+- Do not manually create task folders or files under .tasker/tasks/
+- Use tasker new, tasker add, or tasker import when a new task is needed
 `
 }
 
@@ -76,6 +83,8 @@ Before work:
 During work:
 
 - update declaration.md
+- do not manually create task folders or files under .tasker/tasks/
+- use tasker new, tasker add, or tasker import if a new task is required
 
 After work:
 

@@ -13,4 +13,6 @@ All important communication must happen through:
 - result.md
 - status.json
 
+Never create task folders or files manually under .tasker/tasks. Use `tasker new`, `tasker add`, or `tasker import`.
+
 Never leave undocumented changes.

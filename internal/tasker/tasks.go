@@ -27,6 +27,18 @@ var validTaskTypes = map[string]struct{}{
 	"test":          {},
 }
 
+var validTaskStatuses = map[string]struct{}{
+	"AWAITING_ACTION": {},
+	"BLOCKED":         {},
+	"DONE":            {},
+	"HANDOFF":         {},
+	"IN_PROGRESS":     {},
+	"NEW":             {},
+	"PLANNED":         {},
+	"REVIEW":          {},
+	"RUNNING":         {},
+}
+
 func ValidTaskTypes() []string {
 	types := make([]string, 0, len(validTaskTypes))
 	for taskType := range validTaskTypes {
@@ -34,6 +46,15 @@ func ValidTaskTypes() []string {
 	}
 	slices.Sort(types)
 	return types
+}
+
+func ValidTaskStatuses() []string {
+	statuses := make([]string, 0, len(validTaskStatuses))
+	for status := range validTaskStatuses {
+		statuses = append(statuses, status)
+	}
+	slices.Sort(statuses)
+	return statuses
 }
 
 type CreateTaskInput struct {
@@ -58,9 +79,10 @@ type TaskMeta struct {
 }
 
 type TaskStatus struct {
-	Status  string `json:"status"`
-	Agent   string `json:"agent"`
-	Started string `json:"started"`
+	Status   string        `json:"status"`
+	Agent    string        `json:"agent"`
+	Started  string        `json:"started"`
+	Sessions []TaskSession `json:"sessions,omitempty"`
 }
 
 type Task struct {
@@ -141,22 +163,26 @@ func CreateTask(root string, input CreateTaskInput) (*CreatedTask, error) {
 		return nil, err
 	}
 
+	now := time.Now()
+	sessions := detectTaskSessionsAt(now)
+
 	meta := TaskMeta{
 		ID:        id,
 		Title:     title,
 		Slug:      slug,
 		Type:      taskType,
 		ParentID:  parentID,
-		CreatedAt: time.Now().Format(time.RFC3339),
+		CreatedAt: now.Format(time.RFC3339),
 	}
 	status := TaskStatus{
-		Status:  "NEW",
-		Agent:   "unknown",
-		Started: time.Now().Format(time.RFC3339),
+		Status:   "NEW",
+		Agent:    "unknown",
+		Started:  now.Format(time.RFC3339),
+		Sessions: sessions,
 	}
 
 	files := map[string]string{
-		filepath.Join(taskPath, "task.md"):         taskMarkdown(root, meta, requestedType != ""),
+		filepath.Join(taskPath, "task.md"):         taskMarkdown(root, meta),
 		filepath.Join(taskPath, "instructions.md"): "# Task Instructions\n\nAdd task-specific rules here.\n",
 		filepath.Join(taskPath, "declaration.md"):  "# Declaration\n\nStatus:\n\nUnderstanding:\n\nCompleted:\n\nFiles:\n\nDecisions:\n\nRemaining:\n\nNext agent:\n",
 		filepath.Join(taskPath, "result.md"):       "# Result\n\nSummary:\n",
@@ -173,6 +199,9 @@ func CreateTask(root string, input CreateTaskInput) (*CreatedTask, error) {
 		return nil, err
 	}
 	if err := writeJSON(filepath.Join(taskPath, "status.json"), status); err != nil {
+		return nil, err
+	}
+	if err := writeTaskSessionIndex(taskPath, sessions); err != nil {
 		return nil, err
 	}
 
@@ -201,18 +230,19 @@ func TaskDocumentPath(taskPath, target string) (string, error) {
 }
 
 func GetTask(root, id string) (*Task, error) {
-	tasks, err := loadTasks(root)
+	path, err := findTaskPathByID(root, id)
 	if err != nil {
 		return nil, err
 	}
-
-	for _, task := range tasks {
-		if task.Meta.ID == id {
-			return &task, nil
-		}
+	if path == "" {
+		return nil, fmt.Errorf("task %s not found", id)
 	}
 
-	return nil, fmt.Errorf("task %s not found", id)
+	task, err := loadTaskFromPath(path)
+	if err != nil {
+		return nil, err
+	}
+	return &task, nil
 }
 
 func TaskTree(root string) ([]string, error) {
@@ -298,6 +328,8 @@ func TaskStatusDetailsStyled(root, id string, opts StatusFormatOptions) ([]strin
 	}
 
 	lines = append(lines, "")
+	lines = append(lines, taskSessionDetails(task.Status.Sessions, palette)...)
+	lines = append(lines, "")
 	lines = append(lines, palette.section("Subtasks"))
 	if len(children) == 0 {
 		lines = append(lines, "  none")
@@ -330,32 +362,85 @@ func loadTasks(root string) ([]Task, error) {
 			return nil
 		}
 
-		var meta TaskMeta
-		if err := readJSON(metaPath, &meta); err != nil {
+		task, err := loadTaskFromPath(path)
+		if err != nil {
 			return err
 		}
-
-		var status TaskStatus
-		if err := readJSON(filepath.Join(path, "status.json"), &status); err != nil {
-			return err
-		}
-
-		tasks = append(tasks, Task{
-			Meta:             meta,
-			Status:           status,
-			Path:             path,
-			MetaFile:         metaPath,
-			TaskFile:         filepath.Join(path, "task.md"),
-			InstructionsFile: filepath.Join(path, "instructions.md"),
-			DeclarationFile:  filepath.Join(path, "declaration.md"),
-			ResultFile:       filepath.Join(path, "result.md"),
-		})
+		tasks = append(tasks, task)
 		return nil
 	})
 	if os.IsNotExist(err) {
 		return []Task{}, nil
 	}
 	return tasks, err
+}
+
+func findTaskPathByID(root, id string) (string, error) {
+	tasksRoot := filepath.Join(root, TaskerDirName, "tasks")
+	var match string
+
+	err := filepath.WalkDir(tasksRoot, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if match != "" {
+			return filepath.SkipAll
+		}
+		if !d.IsDir() || path == tasksRoot || filepath.Base(path) == "children" || filepath.Base(path) == "sessions" {
+			return nil
+		}
+
+		metaPath := filepath.Join(path, "meta.json")
+		if _, err := os.Stat(metaPath); err != nil {
+			return nil
+		}
+
+		var meta TaskMeta
+		if err := readJSON(metaPath, &meta); err != nil {
+			return err
+		}
+		if meta.ID == id {
+			match = path
+			return filepath.SkipAll
+		}
+
+		return nil
+	})
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil && err != filepath.SkipAll {
+		return "", err
+	}
+	return match, nil
+}
+
+func loadTaskFromPath(path string) (Task, error) {
+	metaPath := filepath.Join(path, "meta.json")
+
+	var meta TaskMeta
+	if err := readJSON(metaPath, &meta); err != nil {
+		return Task{}, err
+	}
+
+	var status TaskStatus
+	if err := readJSON(filepath.Join(path, "status.json"), &status); err != nil {
+		return Task{}, err
+	}
+	if err := normalizeTaskStatusInPlace(&status); err != nil {
+		return Task{}, fmt.Errorf("load task %s status: %w", meta.ID, err)
+	}
+
+	return Task{
+		Meta:             meta,
+		Status:           status,
+		Path:             path,
+		MetaFile:         metaPath,
+		TaskFile:         filepath.Join(path, "task.md"),
+		InstructionsFile: filepath.Join(path, "instructions.md"),
+		DeclarationFile:  filepath.Join(path, "declaration.md"),
+		ResultFile:       filepath.Join(path, "result.md"),
+	}, nil
 }
 
 func appendTaskTree(path string, depth int, lines *[]string) error {
@@ -436,6 +521,9 @@ func childTasks(taskPath string) ([]Task, error) {
 		if err := readJSON(filepath.Join(path, "status.json"), &status); err != nil {
 			return nil, err
 		}
+		if err := normalizeTaskStatusInPlace(&status); err != nil {
+			return nil, fmt.Errorf("load task %s status: %w", meta.ID, err)
+		}
 
 		children = append(children, Task{
 			Meta:             meta,
@@ -503,6 +591,28 @@ func taskNotes(task *Task, palette statusPalette) []string {
 	return lines
 }
 
+func taskSessionDetails(sessions []TaskSession, palette statusPalette) []string {
+	lines := []string{palette.section("Sessions")}
+	if len(sessions) == 0 {
+		return append(lines, "  none")
+	}
+
+	for _, session := range sessions {
+		lines = append(lines, "  "+session.Agent+" "+session.ID)
+		if session.Source != "" {
+			lines = append(lines, "    source  "+session.Source)
+		}
+		if session.ResumeCommand != "" {
+			lines = append(lines, "    resume  "+session.ResumeCommand)
+		}
+		if session.ForkCommand != "" {
+			lines = append(lines, "    fork    "+session.ForkCommand)
+		}
+	}
+
+	return lines
+}
+
 func readTrimmedFile(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -556,18 +666,46 @@ func slugify(input string) string {
 	return slug
 }
 
-func taskMarkdown(root string, meta TaskMeta, useTypeTemplate bool) string {
-	templateName := "default"
-	if useTypeTemplate {
-		templateName = meta.Type
+func taskMarkdown(root string, meta TaskMeta) string {
+	templateName := strings.TrimSpace(meta.Type)
+	if templateName == "" {
+		templateName = "default"
 	}
 
 	content, err := loadTaskTemplate(root, templateName)
 	if err != nil {
-		return renderTaskTemplate(taskDocumentTemplate(), meta)
+		if templateName == "default" {
+			return renderTaskTemplate(taskDocumentTemplate(), meta)
+		}
+		return renderTaskTemplate(taskTypeTemplate(templateName), meta)
 	}
 
 	return renderTaskTemplate(content, meta)
+}
+
+func UpdateTaskStatus(task *Task, status, agent string, startedAt time.Time) error {
+	next := task.Status
+	next.Status = canonicalTaskStatus(status)
+	if next.Status == "" {
+		next.Status = "NEW"
+	}
+	if _, ok := validTaskStatuses[next.Status]; !ok {
+		return fmt.Errorf("invalid status %q", next.Status)
+	}
+
+	agent = strings.TrimSpace(agent)
+	if agent != "" {
+		next.Agent = agent
+	}
+	if !startedAt.IsZero() {
+		next.Started = startedAt.Format(time.RFC3339)
+	}
+
+	if err := writeJSON(filepath.Join(task.Path, "status.json"), next); err != nil {
+		return err
+	}
+	task.Status = next
+	return nil
 }
 
 func loadTaskTemplate(root, templateName string) (string, error) {
@@ -716,21 +854,44 @@ func (p statusPalette) subtle(value string) string {
 }
 
 func (p statusPalette) statusBadge(status string) string {
-	badge := "[" + status + "]"
+	badge := "[" + strings.ReplaceAll(status, "_", " ") + "]"
 	switch strings.ToUpper(strings.TrimSpace(status)) {
 	case "NEW":
 		return p.wrap("1;34", badge)
+	case "PLANNED":
+		return p.wrap("1;36", badge)
 	case "IN_PROGRESS":
+		return p.wrap("1;33", badge)
+	case "RUNNING":
 		return p.wrap("1;33", badge)
 	case "DONE":
 		return p.wrap("1;32", badge)
 	case "BLOCKED":
 		return p.wrap("1;31", badge)
+	case "HANDOFF":
+		return p.wrap("1;35", badge)
 	case "REVIEW":
+		return p.wrap("1;35", badge)
+	case "AWAITING_ACTION":
 		return p.wrap("1;35", badge)
 	default:
 		return p.wrap("1;36", badge)
 	}
+}
+
+func normalizeTaskStatusInPlace(status *TaskStatus) error {
+	status.Status = canonicalTaskStatus(status.Status)
+	if _, ok := validTaskStatuses[status.Status]; !ok {
+		return fmt.Errorf("invalid status %q", status.Status)
+	}
+	return nil
+}
+
+func canonicalTaskStatus(status string) string {
+	normalized := strings.TrimSpace(strings.ToUpper(status))
+	normalized = strings.ReplaceAll(normalized, "-", "_")
+	normalized = strings.Join(strings.Fields(normalized), "_")
+	return normalized
 }
 
 func (p statusPalette) wrap(code, value string) string {
