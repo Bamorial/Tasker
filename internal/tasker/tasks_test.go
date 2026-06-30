@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGetTaskIncludesInstructionsFile(t *testing.T) {
@@ -57,6 +58,7 @@ func TestInitializeWorkspaceCreatesTaskTemplates(t *testing.T) {
 		"feature.md",
 		"research.md",
 		"review.md",
+		"test.md",
 	}
 
 	for _, name := range templates {
@@ -64,6 +66,16 @@ func TestInitializeWorkspaceCreatesTaskTemplates(t *testing.T) {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected template %s to exist: %v", path, err)
 		}
+	}
+
+	importTemplatePath := filepath.Join(root, TaskerDirName, "templates", "import-tasks.json")
+	if _, err := os.Stat(importTemplatePath); err != nil {
+		t.Fatalf("expected import template %s to exist: %v", importTemplatePath, err)
+	}
+
+	importsDir := filepath.Join(root, TaskerDirName, "imports")
+	if _, err := os.Stat(importsDir); err != nil {
+		t.Fatalf("expected imports dir %s to exist: %v", importsDir, err)
 	}
 }
 
@@ -117,12 +129,15 @@ func TestCreateTaskUsesTaskTypeTemplate(t *testing.T) {
 		"## Problem",
 		"## Steps",
 		"## Expected",
-		"[write here]",
 		"Type: bug",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("expected bug template to include %q, got:\n%s", want, content)
 		}
+	}
+
+	if strings.Contains(content, "[write here]") {
+		t.Fatalf("expected bug template to avoid legacy placeholder text, got:\n%s", content)
 	}
 }
 
@@ -157,6 +172,289 @@ func TestCreateTaskUsesCustomizedWorkspaceTemplate(t *testing.T) {
 		if !strings.Contains(content, want) {
 			t.Fatalf("expected customized template to include %q, got:\n%s", want, content)
 		}
+	}
+}
+
+func TestParseTaskImportDocument(t *testing.T) {
+	doc, err := ParseTaskImportDocument([]byte(`{
+  "tasks": [
+    {
+      "title": "Add import command",
+      "type": "feature",
+      "body": "# Feature\n\n## Goal\n\nShip imports.\n",
+      "subtasks": [
+        {
+          "title": "Add recursive import",
+          "type": "feature",
+          "body": "# Feature\n"
+        }
+      ]
+    }
+  ]
+}`))
+	if err != nil {
+		t.Fatalf("ParseTaskImportDocument: %v", err)
+	}
+
+	if len(doc.Tasks) != 1 {
+		t.Fatalf("expected 1 root task, got %d", len(doc.Tasks))
+	}
+	spec := doc.Tasks[0]
+	if spec.Title != "Add import command" {
+		t.Fatalf("expected title to be parsed, got %q", spec.Title)
+	}
+	if spec.Type != "feature" {
+		t.Fatalf("expected type to be parsed, got %q", spec.Type)
+	}
+	if !strings.Contains(spec.Body, "## Goal") {
+		t.Fatalf("expected body to be preserved, got:\n%s", spec.Body)
+	}
+	if len(spec.Subtasks) != 1 || spec.Subtasks[0].Title != "Add recursive import" {
+		t.Fatalf("expected subtasks to be parsed, got %#v", spec.Subtasks)
+	}
+}
+
+func TestImportTasksCreatesTasksWithImportedBody(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	importPath := filepath.Join(root, "import-tasks.json")
+	importDoc := `{
+  "tasks": [
+    {
+      "title": "Imported task",
+      "type": "documentation",
+      "body": "# Documentation\n\n## Topic\n\nImported from a file.\n",
+      "instructions": "# Task Instructions\n\nImported instructions.\n",
+      "context": {
+        "source": "json"
+      }
+    }
+  ]
+}`
+	if err := os.WriteFile(importPath, []byte(importDoc), 0o644); err != nil {
+		t.Fatalf("WriteFile import doc: %v", err)
+	}
+
+	result, err := ImportTasks(root, importPath, ImportTaskInput{})
+	if err != nil {
+		t.Fatalf("ImportTasks: %v", err)
+	}
+	if len(result.Created) != 1 {
+		t.Fatalf("expected 1 created task, got %d", len(result.Created))
+	}
+
+	task, err := GetTask(root, result.Primary.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+
+	if task.Meta.Title != "Imported task" {
+		t.Fatalf("expected imported title, got %q", task.Meta.Title)
+	}
+	if task.Meta.Type != "documentation" {
+		t.Fatalf("expected imported type, got %q", task.Meta.Type)
+	}
+
+	data, err := os.ReadFile(task.TaskFile)
+	if err != nil {
+		t.Fatalf("ReadFile task.md: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "# Documentation") || !strings.Contains(content, "Imported from a file.") {
+		t.Fatalf("expected imported body to overwrite task.md, got:\n%s", content)
+	}
+
+	instructionsData, err := os.ReadFile(task.InstructionsFile)
+	if err != nil {
+		t.Fatalf("ReadFile instructions.md: %v", err)
+	}
+	if !strings.Contains(string(instructionsData), "Imported instructions.") {
+		t.Fatalf("expected imported instructions to overwrite instructions.md, got:\n%s", string(instructionsData))
+	}
+
+	var context map[string]string
+	if err := readJSON(filepath.Join(task.Path, "context.json"), &context); err != nil {
+		t.Fatalf("readJSON context.json: %v", err)
+	}
+	if context["source"] != "json" {
+		t.Fatalf("expected imported context to be written, got %#v", context)
+	}
+}
+
+func TestImportTasksCreatesNestedSubtasks(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	importPath := filepath.Join(root, "nested-imports.json")
+	importDoc := `{
+  "tasks": [
+    {
+      "title": "Parent task",
+      "type": "feature",
+      "body": "# Feature\n",
+      "subtasks": [
+        {
+          "title": "Child task",
+          "type": "bug",
+          "body": "# Bug\n",
+          "subtasks": [
+            {
+              "title": "Grandchild task",
+              "type": "review",
+              "body": "# Review\n"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}`
+	if err := os.WriteFile(importPath, []byte(importDoc), 0o644); err != nil {
+		t.Fatalf("WriteFile import doc: %v", err)
+	}
+
+	result, err := ImportTasks(root, importPath, ImportTaskInput{})
+	if err != nil {
+		t.Fatalf("ImportTasks: %v", err)
+	}
+
+	if len(result.Created) != 3 {
+		t.Fatalf("expected 3 created tasks, got %d", len(result.Created))
+	}
+
+	parent, err := GetTask(root, result.Primary.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+
+	children, err := childTasks(parent.Path)
+	if err != nil {
+		t.Fatalf("childTasks parent: %v", err)
+	}
+	if len(children) != 1 {
+		t.Fatalf("expected 1 child task, got %d", len(children))
+	}
+
+	child := children[0]
+	if child.Meta.Title != "Child task" || child.Meta.ParentID != parent.Meta.ID {
+		t.Fatalf("expected imported child to be nested under parent, got %+v", child.Meta)
+	}
+
+	grandchildren, err := childTasks(child.Path)
+	if err != nil {
+		t.Fatalf("childTasks child: %v", err)
+	}
+	if len(grandchildren) != 1 {
+		t.Fatalf("expected 1 grandchild task, got %d", len(grandchildren))
+	}
+	if grandchildren[0].Meta.Title != "Grandchild task" || grandchildren[0].Meta.ParentID != child.Meta.ID {
+		t.Fatalf("expected imported grandchild to be nested under child, got %+v", grandchildren[0].Meta)
+	}
+}
+
+func TestImportTasksUsesParentOverrideForRootTasks(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	parent, err := CreateTask(root, CreateTaskInput{Title: "Existing parent", Type: "feature"})
+	if err != nil {
+		t.Fatalf("CreateTask parent: %v", err)
+	}
+
+	importPath := filepath.Join(root, "child-imports.json")
+	importDoc := `{
+  "tasks": [
+    {
+      "title": "Imported child",
+      "type": "review",
+      "body": "# Review\n"
+    }
+  ]
+}`
+	if err := os.WriteFile(importPath, []byte(importDoc), 0o644); err != nil {
+		t.Fatalf("WriteFile import doc: %v", err)
+	}
+
+	result, err := ImportTasks(root, importPath, ImportTaskInput{ParentID: parent.ID})
+	if err != nil {
+		t.Fatalf("ImportTasks: %v", err)
+	}
+
+	task, err := GetTask(root, result.Primary.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+
+	if task.Meta.ParentID != parent.ID {
+		t.Fatalf("expected imported root to use override parent %q, got %q", parent.ID, task.Meta.ParentID)
+	}
+}
+
+func TestCreateImportTemplateCopy(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	path, err := CreateImportTemplateCopy(root)
+	if err != nil {
+		t.Fatalf("CreateImportTemplateCopy: %v", err)
+	}
+
+	if filepath.Dir(path) != ImportsDir(root) {
+		t.Fatalf("expected import copy in %s, got %s", ImportsDir(root), path)
+	}
+
+	templateData, err := os.ReadFile(ImportTemplatePath(root))
+	if err != nil {
+		t.Fatalf("ReadFile template: %v", err)
+	}
+	copyData, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile copy: %v", err)
+	}
+	if string(copyData) != string(templateData) {
+		t.Fatalf("expected import copy to match template")
+	}
+}
+
+func TestLatestImportPath(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	first := filepath.Join(ImportsDir(root), "import-first.json")
+	second := filepath.Join(ImportsDir(root), "import-second.json")
+	if err := os.WriteFile(first, []byte(`{"tasks":[{"title":"First"}]}`), 0o644); err != nil {
+		t.Fatalf("WriteFile first: %v", err)
+	}
+	if err := os.WriteFile(second, []byte(`{"tasks":[{"title":"Second"}]}`), 0o644); err != nil {
+		t.Fatalf("WriteFile second: %v", err)
+	}
+
+	oldTime := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
+	newTime := oldTime.Add(time.Minute)
+	if err := os.Chtimes(first, oldTime, oldTime); err != nil {
+		t.Fatalf("Chtimes first: %v", err)
+	}
+	if err := os.Chtimes(second, newTime, newTime); err != nil {
+		t.Fatalf("Chtimes second: %v", err)
+	}
+
+	path, err := LatestImportPath(root)
+	if err != nil {
+		t.Fatalf("LatestImportPath: %v", err)
+	}
+	if path != second {
+		t.Fatalf("expected latest import path %s, got %s", second, path)
 	}
 }
 
@@ -394,7 +692,7 @@ func TestTaskStatusesStyledIncludesANSIWhenEnabled(t *testing.T) {
 
 func TestValidTaskTypesSorted(t *testing.T) {
 	got := ValidTaskTypes()
-	want := []string{"bug", "decision", "documentation", "feature", "research", "review"}
+	want := []string{"bug", "decision", "documentation", "feature", "research", "review", "test"}
 
 	if len(got) != len(want) {
 		t.Fatalf("expected %d task types, got %d", len(want), len(got))

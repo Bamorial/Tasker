@@ -24,6 +24,7 @@ var validTaskTypes = map[string]struct{}{
 	"decision":      {},
 	"documentation": {},
 	"review":        {},
+	"test":          {},
 }
 
 func ValidTaskTypes() []string {

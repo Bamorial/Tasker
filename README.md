@@ -63,6 +63,8 @@ Tasker currently implements:
 - `tasker init`
 - `tasker new [title]`
 - `tasker add [title]`
+- `tasker import [path]`
+- `tasker import template`
 - `tasker checkout <id>`
 - `tasker open <id>`
 - `tasker instruction <id>`
@@ -138,6 +140,25 @@ Create a child task under the current task:
 tasker add "Document fallback behavior"
 ```
 
+Create an editable import file:
+
+```bash
+tasker import template
+```
+
+Import the most recent working copy from `.tasker/imports/`:
+
+```bash
+tasker import
+```
+
+Import a specific JSON file:
+
+```bash
+cp .tasker/templates/import-tasks.json /tmp/my-tasks.json
+tasker import /tmp/my-tasks.json
+```
+
 See the task tree:
 
 ```bash
@@ -196,6 +217,8 @@ Behavior:
 
 - creates the `.tasker/` workspace directories if missing
 - creates starter templates like `AGENTS.md`, `.tasker/START.md`, and `.tasker/config.yaml`
+- creates an editable task import template at `.tasker/templates/import-tasks.json`
+- creates `.tasker/imports/` for editable import working copies
 - creates editable task templates under `.tasker/templates/tasks/`
 - does not overwrite existing files that are already present
 
@@ -211,7 +234,7 @@ Creates a top-level task.
 
 Options:
 
-- `--type <type>`: task type, one of `bug`, `decision`, `documentation`, `feature`, `research`, `review`
+- `--type <type>`: task type, one of `bug`, `decision`, `documentation`, `feature`, `research`, `review`, `test`
 - `--open <target>`: open `task`, `instructions`, `declaration`, `result`, or `meta`
 - `--no-open`: create the task without opening an editor
 - `-c`, `--checkout`: create the task and set it as the current workspace without switching Git branches
@@ -263,6 +286,65 @@ Examples:
 tasker add --parent 006 "Add tests for branch naming"
 tasker add "Split status output formatting"
 tasker add --type documentation --open instructions "Describe checkout behavior"
+```
+
+### `tasker import [path]`
+
+Imports tasks from a JSON document on disk.
+
+Options:
+
+- `--parent <id>`: attach all imported root tasks under an existing parent task
+- `--open <target>`: open `task`, `instructions`, `declaration`, `result`, or `meta`
+- `--no-open`: import the task without opening an editor
+- `-c`, `--checkout`: import the tasks and set the first imported root task as the current workspace without switching Git branches
+- `-b`, `--branch-checkout`: import the tasks, set the first imported root task as current, and create or switch to its task branch
+
+Path behavior:
+
+- if a path is passed, Tasker imports that file
+- if no path is passed, Tasker imports the most recently modified `.json` file from `.tasker/imports/`
+- if `.tasker/imports/` has no import files yet, Tasker tells you to run `tasker import template` first
+
+Import document format:
+
+- the document is a JSON object with a top-level `tasks` array
+- each task object can declare `title`, `type`, `body`, `instructions`, `declaration`, `result`, `context`, and `subtasks`
+- `subtasks` is recursive, so one file can define a whole task tree
+- `type` is optional and defaults to `feature`
+- `body` becomes `task.md` when it is present
+- the optional document fields overwrite their matching Tasker files when provided
+
+Behavior:
+
+- Tasker creates every declared task and subtask in order
+- nested `subtasks` become child task folders
+- if a text field is empty, Tasker keeps the default generated file content
+- if `context` is provided, Tasker writes it to `context.json`
+- `.tasker/templates/import-tasks.json` provides the import shape to copy and edit
+- `-c`, `-b`, and `--open` operate on the first imported root task
+
+Example:
+
+```bash
+tasker import
+```
+
+### `tasker import template`
+
+Creates a copy of `.tasker/templates/import-tasks.json` inside `.tasker/imports/` and opens it in the configured editor.
+
+Behavior:
+
+- creates a timestamped file like `.tasker/imports/import-20260630-153045.json`
+- copies the template shape exactly
+- opens the new file in the configured editor
+- prints the file path if no editor is configured or opening fails
+
+Example:
+
+```bash
+tasker import template
 ```
 
 ### `tasker checkout <id>`
@@ -327,7 +409,7 @@ Opens the project-wide `.tasker/instructions.md`.
 
 ## Task Templates
 
-`tasker init` creates editable task templates in `.tasker/templates/tasks/`:
+`tasker init` creates an editable import template at `.tasker/templates/import-tasks.json`, an `.tasker/imports/` workspace for working copies, and task templates in `.tasker/templates/tasks/`:
 
 - `default.md`
 - `bug.md`
@@ -336,6 +418,7 @@ Opens the project-wide `.tasker/instructions.md`.
 - `feature.md`
 - `research.md`
 - `review.md`
+- `test.md`
 
 Tasker replaces these placeholders when it creates `task.md`:
 

@@ -118,6 +118,38 @@ func filesTemplate() string {
 `
 }
 
+func importTasksTemplate() string {
+	return `{
+  "_comment_valid_task_types": "bug, decision, documentation, feature, research, review, test",
+  "tasks": [
+    {
+      "_comment_type": "Valid types: bug, decision, documentation, feature, research, review, test",
+      "title": "",
+      "type": "",
+      "body": "",
+      "instructions": "",
+      "declaration": "",
+      "result": "",
+      "context": {},
+      "subtasks": [
+        {
+          "_comment_type": "Valid types: bug, decision, documentation, feature, research, review, test",
+          "title": "",
+          "type": "",
+          "body": "",
+          "instructions": "",
+          "declaration": "",
+          "result": "",
+          "context": {},
+          "subtasks": []
+        }
+      ]
+    }
+  ]
+}
+`
+}
+
 func taskDocumentTemplate() string {
 	return `# {{TITLE}}
 
@@ -169,6 +201,12 @@ func taskTypeTemplate(taskType string) string {
 			{Title: "Target", Prompt: "What should be reviewed?"},
 			{Title: "Focus", Prompt: "What should reviewers check?"},
 			{Title: "Notes", Prompt: "Extra context:"},
+		})
+	case "test":
+		return taskTypeTemplateWithSections("Test", []taskTemplateSection{
+			{Title: "Target", Prompt: "What behavior or component should be tested?"},
+			{Title: "Coverage", Prompt: "What scenarios should the tests cover?"},
+			{Title: "Notes", Prompt: "Important setup, fixtures, or constraints:"},
 		})
 	default:
 		return taskDocumentTemplate()

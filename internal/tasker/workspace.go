@@ -41,6 +41,7 @@ func InitializeWorkspace(root string) error {
 		filepath.Join(root, TaskerDirName, "refs"),
 		filepath.Join(root, TaskerDirName, "memory"),
 		filepath.Join(root, TaskerDirName, "current"),
+		filepath.Join(root, TaskerDirName, "imports"),
 		filepath.Join(root, TaskerDirName, "sessions"),
 		filepath.Join(root, TaskerDirName, "logs"),
 		filepath.Join(root, TaskerDirName, "templates"),
@@ -62,6 +63,7 @@ func InitializeWorkspace(root string) error {
 		filepath.Join(root, TaskerDirName, "current", "WORKSPACE.md"):                workspaceTemplate(),
 		filepath.Join(root, TaskerDirName, "current", "FILES.md"):                    filesTemplate(),
 		filepath.Join(root, TaskerDirName, "current", "CONTEXT.json"):                "{}\n",
+		filepath.Join(root, TaskerDirName, "templates", "import-tasks.json"):         importTasksTemplate(),
 		filepath.Join(root, TaskerDirName, "templates", "tasks", "default.md"):       taskDocumentTemplate(),
 		filepath.Join(root, TaskerDirName, "templates", "tasks", "bug.md"):           taskTypeTemplate("bug"),
 		filepath.Join(root, TaskerDirName, "templates", "tasks", "decision.md"):      taskTypeTemplate("decision"),
@@ -69,6 +71,7 @@ func InitializeWorkspace(root string) error {
 		filepath.Join(root, TaskerDirName, "templates", "tasks", "feature.md"):       taskTypeTemplate("feature"),
 		filepath.Join(root, TaskerDirName, "templates", "tasks", "research.md"):      taskTypeTemplate("research"),
 		filepath.Join(root, TaskerDirName, "templates", "tasks", "review.md"):        taskTypeTemplate("review"),
+		filepath.Join(root, TaskerDirName, "templates", "tasks", "test.md"):          taskTypeTemplate("test"),
 	}
 
 	for path, content := range files {

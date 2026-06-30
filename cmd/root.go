@@ -18,6 +18,7 @@ func init() {
 	rootCmd.AddCommand(checkoutCmd)
 	rootCmd.AddCommand(newCmd)
 	rootCmd.AddCommand(addCmd)
+	rootCmd.AddCommand(importCmd)
 	rootCmd.AddCommand(deleteCmd)
 	rootCmd.AddCommand(openCmd)
 	rootCmd.AddCommand(metaCmd)
