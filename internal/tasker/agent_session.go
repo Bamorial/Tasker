@@ -104,3 +104,20 @@ func TaskSessionCommand(task *Task, session TaskSession, action AgentSessionActi
 	cmd.Dir = task.Path
 	return cmd, nil
 }
+
+func ResumeTaskCommand(root string, task *Task, fork bool) (*exec.Cmd, error) {
+	executablePath, err := currentExecutablePath()
+	if err != nil {
+		return nil, err
+	}
+
+	args := []string{"resume"}
+	if fork {
+		args = append(args, "--fork")
+	}
+	args = append(args, task.Meta.ID)
+
+	cmd := exec.Command(executablePath, args...)
+	cmd.Dir = root
+	return cmd, nil
+}

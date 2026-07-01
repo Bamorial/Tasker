@@ -30,6 +30,7 @@ var validTaskTypes = map[string]struct{}{
 var validTaskStatuses = map[string]struct{}{
 	"AWAITING_ACTION": {},
 	"BLOCKED":         {},
+	"CANCELLED":       {},
 	"DONE":            {},
 	"HANDOFF":         {},
 	"IN_PROGRESS":     {},
@@ -908,6 +909,8 @@ func (p statusPalette) statusBadge(status string) string {
 		return p.wrap("1;33", badge)
 	case "DONE":
 		return p.wrap("1;32", badge)
+	case "CANCELLED":
+		return p.wrap("1;31", badge)
 	case "BLOCKED":
 		return p.wrap("1;31", badge)
 	case "HANDOFF":

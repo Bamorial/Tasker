@@ -47,6 +47,7 @@ const (
 	modalImport               modalKind = "import"
 	modalOpenDoc              modalKind = "open-doc"
 	modalDelete               modalKind = "delete"
+	modalStopExecution        modalKind = "stop-execution"
 	modalSession              modalKind = "session"
 	filterAll                           = "all"
 	projectInstructionsTarget           = "project-instructions"
@@ -59,6 +60,8 @@ type sessionModal struct {
 }
 
 type confirmModal struct {
+	Kind        modalKind
+	TaskID      string
 	Title       string
 	Body        string
 	Recursive   bool
@@ -101,6 +104,12 @@ type snapshotMsg struct {
 
 type workspaceTickMsg struct{}
 
+type fileChangeMsg struct{}
+
+type fileWatchErrorMsg struct {
+	Err error
+}
+
 type externalDoneMsg struct {
 	Status     string
 	SelectedID string
@@ -110,6 +119,8 @@ type externalDoneMsg struct {
 
 type model struct {
 	root string
+
+	keybindings tasker.TUIKeybindings
 
 	width  int
 	height int
@@ -133,6 +144,9 @@ type model struct {
 	currentViewport viewport.Model
 	workerViewport  viewport.Model
 
+	currentViewportTaskID string
+	currentViewportView   currentViewMode
+
 	form    *formModal
 	session *sessionModal
 	confirm *confirmModal
@@ -141,16 +155,24 @@ type model struct {
 	lastStatus       string
 	lastErr          string
 	pendingSelection string
+	refreshPending   bool
 }
 
 func Run(root string) error {
 	m := newModel(root)
 	p := tea.NewProgram(m, tea.WithAltScreen())
-	_, err := p.Run()
+	watcher, err := startTaskerWatcher(root, p.Send)
+	if err != nil {
+		return err
+	}
+	defer watcher.Close()
+	_, err = p.Run()
 	return err
 }
 
 func newModel(root string) model {
+	keybindings, configErr := loadKeybindings(root)
+
 	filter := textinput.New()
 	filter.Prompt = "Filter: "
 	filter.Placeholder = "title, id, slug"
@@ -162,6 +184,7 @@ func newModel(root string) model {
 
 	return model{
 		root:            root,
+		keybindings:     keybindings,
 		focus:           panelTasks,
 		currentViewMode: viewAuto,
 		filterInput:     filter,
@@ -171,6 +194,7 @@ func newModel(root string) model {
 		taskViewport:    taskVP,
 		currentViewport: currentVP,
 		workerViewport:  workerVP,
+		lastErr:         configErr,
 	}
 }
 
@@ -187,6 +211,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncDerivedState()
 		return m, nil
 	case snapshotMsg:
+		m.refreshPending = false
 		if msg.Err != nil {
 			m.lastErr = msg.Err.Error()
 			return m, nil
@@ -200,6 +225,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingSelection = ""
 			m.ensureSelection()
 			m.syncDerivedState()
+		}
+		return m, nil
+	case fileChangeMsg:
+		if m.refreshPending {
+			return m, nil
+		}
+		m.refreshPending = true
+		return m, refreshCmd(m.root)
+	case fileWatchErrorMsg:
+		if msg.Err != nil {
+			m.lastErr = msg.Err.Error()
 		}
 		return m, nil
 	case mutationResultMsg:
@@ -238,9 +274,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case workspaceTickMsg:
 		if m.currentViewMode == viewAgent {
-			m.syncCurrentViewport()
+			m.syncCurrentViewport(false)
 		}
-		if m.hasRunningTasks() {
+		if !m.refreshPending {
+			m.refreshPending = true
 			return m, tea.Batch(refreshCmd(m.root), workspaceTickCmd())
 		}
 		return m, workspaceTickCmd()
@@ -298,32 +335,34 @@ func (m model) View() string {
 }
 
 func (m *model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "ctrl+c", "q":
+	key := msg.String()
+
+	switch {
+	case keyMatches(m.keybindings.Global, "quit", key):
 		return m, tea.Quit
-	case "0":
+	case keyMatches(m.keybindings.Global, "focus_current", key):
 		m.focus = panelCurrent
 		return m, nil
-	case "1":
+	case keyMatches(m.keybindings.Global, "focus_tasks", key):
 		m.focus = panelTasks
 		return m, nil
-	case "2":
+	case keyMatches(m.keybindings.Global, "focus_workers", key):
 		m.focus = panelWorkers
 		return m, nil
-	case "?":
+	case keyMatches(m.keybindings.Global, "toggle_help", key):
 		m.help = !m.help
 		return m, nil
-	case "R":
+	case keyMatches(m.keybindings.Global, "refresh", key):
 		return m, refreshCmd(m.root)
-	case "/":
+	case keyMatches(m.keybindings.Global, "filter", key):
 		m.filtering = true
 		m.filterInput.Focus()
 		return m, nil
-	case "S":
+	case keyMatches(m.keybindings.Global, "cycle_status_filter", key):
 		m.statusFilter = cycleOption(m.statusFilter, append([]string{filterAll}, tasker.ValidTaskStatuses()...))
 		m.applyFilters()
 		return m, nil
-	case "T":
+	case keyMatches(m.keybindings.Global, "cycle_type_filter", key):
 		m.typeFilter = cycleOption(m.typeFilter, append([]string{filterAll}, tasker.ValidTaskTypes()...))
 		m.applyFilters()
 		return m, nil
@@ -342,70 +381,83 @@ func (m *model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) updateTasksViewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "up", "k":
+	key := msg.String()
+
+	switch {
+	case keyMatches(m.keybindings.Tasks, "move_up", key):
 		m.moveSelection(-1)
 		return m, nil
-	case "down", "j":
+	case keyMatches(m.keybindings.Tasks, "move_down", key):
 		m.moveSelection(1)
 		return m, nil
-	case "pgup":
+	case keyMatches(m.keybindings.Tasks, "page_up", key):
 		m.moveSelection(-5)
 		return m, nil
-	case "pgdown":
+	case keyMatches(m.keybindings.Tasks, "page_down", key):
 		m.moveSelection(5)
 		return m, nil
-	case "n":
+	case keyMatches(m.keybindings.Tasks, "new_task", key):
 		m.form = m.newTaskForm()
 		return m, nil
-	case "a":
+	case keyMatches(m.keybindings.Tasks, "add_child", key):
 		m.form = m.newChildTaskForm()
 		return m, nil
-	case "m":
+	case keyMatches(m.keybindings.Tasks, "edit_meta", key):
 		task := m.selectedTask()
 		if task == nil {
 			return m.withError("select a task first"), nil
 		}
 		m.form = m.newMetaForm(*task)
 		return m, nil
-	case "c":
+	case keyMatches(m.keybindings.Tasks, "checkout", key):
 		task := m.selectedTask()
 		if task == nil {
 			return m.withError("select a task first"), nil
 		}
 		m.form = m.newCheckoutForm(*task)
 		return m, nil
-	case "u":
+	case keyMatches(m.keybindings.Tasks, "import_tasks", key):
 		m.form = m.newImportForm()
 		return m, nil
-	case "I":
+	case keyMatches(m.keybindings.Tasks, "create_import_template", key):
 		return m, m.createImportTemplateCmd()
-	case "d":
+	case keyMatches(m.keybindings.Tasks, "delete_task", key):
 		task := m.selectedTask()
 		if task == nil {
 			return m.withError("select a task first"), nil
 		}
 		m.confirm = &confirmModal{
+			Kind:      modalDelete,
+			TaskID:    task.Meta.ID,
 			Title:     "Delete Task",
 			Body:      fmt.Sprintf("Delete task %s %s?", task.Meta.ID, task.Meta.Title),
 			Recursive: false,
 		}
 		return m, nil
-	case "e":
+	case keyMatches(m.keybindings.Tasks, "open_doc", key):
 		m.form = m.newOpenDocForm()
 		return m, nil
-	case "x":
+	case keyMatches(m.keybindings.Tasks, "run_do", key):
 		task := m.selectedTask()
 		if task == nil {
 			return m.withError("select a task first"), nil
 		}
 		return m.startDoJob(*task)
-	case "s":
-		return m.openSessionPicker(tasker.AgentSessionResume)
-	case "f":
+	case keyMatches(m.keybindings.Tasks, "resume", key):
+		return m.resumeSelectedTask(false)
+	case keyMatches(m.keybindings.Tasks, "fork_session", key):
 		return m.openSessionPicker(tasker.AgentSessionFork)
-	case "enter":
+	case keyMatches(m.keybindings.Tasks, "open_output", key):
+		return m.openSelectedTaskAgentOutput()
+	case keyMatches(m.keybindings.Tasks, "open_current", key):
 		m.toggleSelectedTaskExpansion()
+		if task := m.selectedTask(); task != nil {
+			if task.Status.Status == "RUNNING" {
+				m.currentViewMode = viewAgent
+			} else {
+				m.currentViewMode = viewAuto
+			}
+		}
 		m.focus = panelCurrent
 		m.syncDerivedState()
 		return m, nil
@@ -415,34 +467,38 @@ func (m *model) updateTasksViewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) updateCurrentViewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "t":
+	key := msg.String()
+
+	switch {
+	case keyMatches(m.keybindings.Current, "show_task", key):
 		m.currentViewMode = viewTask
-		m.syncCurrentViewport()
+		m.syncCurrentViewport(true)
 		return m, nil
-	case "r":
+	case keyMatches(m.keybindings.Current, "show_result", key):
 		m.currentViewMode = viewResult
-		m.syncCurrentViewport()
+		m.syncCurrentViewport(true)
 		return m, nil
-	case "s":
+	case keyMatches(m.keybindings.Current, "show_status", key):
 		m.currentViewMode = viewStatus
-		m.syncCurrentViewport()
+		m.syncCurrentViewport(true)
 		return m, nil
-	case "w":
+	case keyMatches(m.keybindings.Current, "show_agent", key):
 		m.currentViewMode = viewAgent
-		m.syncCurrentViewport()
+		m.syncCurrentViewport(true)
 		return m, nil
-	case "e":
+	case keyMatches(m.keybindings.Current, "open_output", key):
+		return m.openSelectedTaskAgentOutput()
+	case keyMatches(m.keybindings.Current, "edit_doc", key):
 		return m.openSelectedTaskInEditor()
-	case "x":
+	case keyMatches(m.keybindings.Current, "run_do", key):
 		task := m.selectedTask()
 		if task == nil {
 			return m.withError("select a task first"), nil
 		}
 		return m.startDoJob(*task)
-	case "S":
-		return m.openSessionPicker(tasker.AgentSessionResume)
-	case "F":
+	case keyMatches(m.keybindings.Current, "resume", key):
+		return m.resumeSelectedTask(false)
+	case keyMatches(m.keybindings.Current, "fork_session", key):
 		return m.openSessionPicker(tasker.AgentSessionFork)
 	default:
 		return m.updateViewportKeys(msg, &m.currentViewport)
@@ -450,20 +506,22 @@ func (m *model) updateCurrentViewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) updateWorkersViewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "up", "k":
+	key := msg.String()
+
+	switch {
+	case keyMatches(m.keybindings.Workers, "move_up", key):
 		m.moveWorkerSelection(-1)
 		return m, nil
-	case "down", "j":
+	case keyMatches(m.keybindings.Workers, "move_down", key):
 		m.moveWorkerSelection(1)
 		return m, nil
-	case "pgup":
+	case keyMatches(m.keybindings.Workers, "page_up", key):
 		m.moveWorkerSelection(-5)
 		return m, nil
-	case "pgdown":
+	case keyMatches(m.keybindings.Workers, "page_down", key):
 		m.moveWorkerSelection(5)
 		return m, nil
-	case "enter":
+	case keyMatches(m.keybindings.Workers, "open_output", key):
 		task := m.selectedWorkerTask()
 		if task == nil {
 			return m.withError("no running task selected"), nil
@@ -473,25 +531,50 @@ func (m *model) updateWorkersViewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.focus = panelCurrent
 		m.syncDerivedState()
 		return m, nil
+	case keyMatches(m.keybindings.Workers, "stop_task", key):
+		task := m.selectedWorkerTask()
+		if task == nil {
+			return m.withError("no running task selected"), nil
+		}
+		m.confirm = &confirmModal{
+			Kind:   modalStopExecution,
+			TaskID: task.Meta.ID,
+			Title:  "Stop Task Execution",
+			Body:   fmt.Sprintf("Stop execution for task %s %s?", task.Meta.ID, task.Meta.Title),
+		}
+		return m, nil
 	default:
 		return m.updateViewportKeys(msg, &m.workerViewport)
 	}
 }
 
+func (m *model) openSelectedTaskAgentOutput() (tea.Model, tea.Cmd) {
+	task := m.selectedTask()
+	if task == nil {
+		return m.withError("select a task first"), nil
+	}
+	m.currentViewMode = viewAgent
+	m.focus = panelCurrent
+	m.syncCurrentViewport(true)
+	return m, nil
+}
+
 func (m *model) updateViewportKeys(msg tea.KeyMsg, vp *viewport.Model) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
-	switch msg.String() {
-	case "up", "k", "ctrl+p":
+	key := msg.String()
+
+	switch {
+	case keyMatches(m.keybindings.Viewport, "line_up", key):
 		vp.LineUp(1)
-	case "down", "j", "ctrl+n":
+	case keyMatches(m.keybindings.Viewport, "line_down", key):
 		vp.LineDown(1)
-	case "pgup", "b":
+	case keyMatches(m.keybindings.Viewport, "page_up", key):
 		vp.HalfViewUp()
-	case "pgdown", "space":
+	case keyMatches(m.keybindings.Viewport, "page_down", key):
 		vp.HalfViewDown()
-	case "g", "home":
+	case keyMatches(m.keybindings.Viewport, "top", key):
 		vp.GotoTop()
-	case "G", "end":
+	case keyMatches(m.keybindings.Viewport, "bottom", key):
 		vp.GotoBottom()
 	default:
 		*vp, cmd = vp.Update(msg)
@@ -500,12 +583,14 @@ func (m *model) updateViewportKeys(msg tea.KeyMsg, vp *viewport.Model) (tea.Mode
 }
 
 func (m *model) updateFilter(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
+	key := msg.String()
+
+	switch {
+	case keyMatches(m.keybindings.Filter, "cancel", key):
 		m.filtering = false
 		m.filterInput.Blur()
 		return m, nil
-	case "enter":
+	case keyMatches(m.keybindings.Filter, "apply", key):
 		m.filtering = false
 		m.filterInput.Blur()
 		m.applyFilters()
@@ -523,29 +608,31 @@ func (m *model) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	switch msg.String() {
-	case "esc":
+	key := msg.String()
+
+	switch {
+	case keyMatches(m.keybindings.Form, "cancel", key):
 		m.form = nil
 		return m, nil
-	case "tab", "down":
+	case keyMatches(m.keybindings.Form, "next_field", key):
 		m.form.Next()
 		return m, nil
-	case "shift+tab", "up":
+	case keyMatches(m.keybindings.Form, "prev_field", key):
 		m.form.Prev()
 		return m, nil
-	case "left":
+	case keyMatches(m.keybindings.Form, "prev_option", key):
 		if len(m.form.Fields) > 0 {
 			m.form.Fields[m.form.Focus].Cycle(-1)
 		}
 		return m, nil
-	case "right":
+	case keyMatches(m.keybindings.Form, "next_option", key):
 		if len(m.form.Fields) > 0 {
 			m.form.Fields[m.form.Focus].Cycle(1)
 		}
 		return m, nil
-	case "ctrl+s":
+	case keyMatches(m.keybindings.Form, "submit", key):
 		return m.submitForm()
-	case "enter":
+	case keyMatches(m.keybindings.Form, "submit_or_next", key):
 		if len(m.form.Fields) > 0 && m.form.Fields[m.form.Focus].Kind == fieldText {
 			m.form.Next()
 			return m, nil
@@ -568,21 +655,23 @@ func (m *model) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) updateSessionPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
+	key := msg.String()
+
+	switch {
+	case keyMatches(m.keybindings.Session, "cancel", key):
 		m.session = nil
 		return m, nil
-	case "up", "k":
+	case keyMatches(m.keybindings.Session, "move_up", key):
 		if m.session.Index > 0 {
 			m.session.Index--
 		}
 		return m, nil
-	case "down", "j":
+	case keyMatches(m.keybindings.Session, "move_down", key):
 		if m.session.Index < len(m.session.Sessions)-1 {
 			m.session.Index++
 		}
 		return m, nil
-	case "enter":
+	case keyMatches(m.keybindings.Session, "select", key):
 		task := m.selectedTask()
 		if task == nil {
 			m.session = nil
@@ -609,32 +698,42 @@ func (m *model) updateSessionPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
+	key := msg.String()
+
+	switch {
+	case keyMatches(m.keybindings.Confirm, "cancel", key):
 		m.confirm = nil
 		return m, nil
-	case "left", "h", "right", "l":
+	case keyMatches(m.keybindings.Confirm, "toggle_choice", key):
 		m.confirm.SelectedYes = !m.confirm.SelectedYes
 		return m, nil
-	case "r":
-		m.confirm.Recursive = !m.confirm.Recursive
+	case keyMatches(m.keybindings.Confirm, "toggle_recursive", key):
+		if m.confirm.Kind == modalDelete {
+			m.confirm.Recursive = !m.confirm.Recursive
+		}
 		return m, nil
-	case "enter":
+	case keyMatches(m.keybindings.Confirm, "accept", key):
 		if !m.confirm.SelectedYes {
 			m.confirm = nil
 			return m, nil
 		}
-		task := m.selectedTask()
-		if task == nil {
-			m.confirm = nil
-			return m.withError("select a task first"), nil
-		}
+		selectedID := m.confirm.TaskID
+		kind := m.confirm.Kind
 		recursive := m.confirm.Recursive
-		selectedID := task.Meta.ID
 		m.confirm = nil
-		return m, mutationCmd("Deleted task "+selectedID, selectedID, true, func() (*exec.Cmd, error) {
-			return nil, tasker.DeleteTask(m.root, selectedID, recursive)
-		})
+		switch kind {
+		case modalStopExecution:
+			m.selectedTaskID = selectedID
+			m.focus = panelTasks
+			m.syncDerivedState()
+			return m, mutationCmd("Stopped task "+selectedID, selectedID, true, func() (*exec.Cmd, error) {
+				return nil, tasker.StopTaskExecution(m.root, selectedID)
+			})
+		default:
+			return m, mutationCmd("Deleted task "+selectedID, selectedID, true, func() (*exec.Cmd, error) {
+				return nil, tasker.DeleteTask(m.root, selectedID, recursive)
+			})
+		}
 	}
 	return m, nil
 }
@@ -1065,7 +1164,7 @@ func (m *model) syncDerivedState() {
 	m.ensureWorkerSelection()
 	m.resizeViewports()
 	m.syncTaskViewport()
-	m.syncCurrentViewport()
+	m.syncCurrentViewport(false)
 	m.syncWorkerViewport()
 }
 
@@ -1093,7 +1192,12 @@ func (m model) renderHeader() string {
 	meta := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render(
 		fmt.Sprintf("%s  version %s", m.root, buildinfo.Version),
 	)
-	focus := metaStyle.Render("focus 0=current 1=tasks 2=workers")
+	focus := metaStyle.Render(fmt.Sprintf(
+		"focus %s=current %s=tasks %s=workers",
+		keyLabel(m.keybindings.Global, "focus_current"),
+		keyLabel(m.keybindings.Global, "focus_tasks"),
+		keyLabel(m.keybindings.Global, "focus_workers"),
+	))
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
 		titleStyle.Render("Tasker TUI"),
@@ -1130,16 +1234,16 @@ func (m model) renderFooter() string {
 	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 
 	footer := []string{
-		keyStyle.Render("0/1/2 focus panels"),
-		keyStyle.Render("/ filter"),
-		keyStyle.Render("S status filter"),
-		keyStyle.Render("T type"),
-		keyStyle.Render("enter open task/output"),
-		keyStyle.Render("t/r/s/w switch current view"),
-		keyStyle.Render("e edit  x do  S resume  F fork"),
-		keyStyle.Render("R refresh"),
-		keyStyle.Render("? help"),
-		keyStyle.Render("q quit"),
+		keyStyle.Render(fmt.Sprintf("%s/%s/%s focus panels", keyLabel(m.keybindings.Global, "focus_current"), keyLabel(m.keybindings.Global, "focus_tasks"), keyLabel(m.keybindings.Global, "focus_workers"))),
+		keyStyle.Render(fmt.Sprintf("%s filter", keyLabel(m.keybindings.Global, "filter"))),
+		keyStyle.Render(fmt.Sprintf("%s status filter", keyLabel(m.keybindings.Global, "cycle_status_filter"))),
+		keyStyle.Render(fmt.Sprintf("%s type filter", keyLabel(m.keybindings.Global, "cycle_type_filter"))),
+		keyStyle.Render(fmt.Sprintf("%s open task/output  %s/%s delete/stop", keyLabel(m.keybindings.Tasks, "open_current"), keyLabel(m.keybindings.Tasks, "delete_task"), keyLabel(m.keybindings.Workers, "stop_task"))),
+		keyStyle.Render(fmt.Sprintf("%s/%s/%s/%s switch current view", keyLabel(m.keybindings.Current, "show_task"), keyLabel(m.keybindings.Current, "show_result"), keyLabel(m.keybindings.Current, "show_status"), keyLabel(m.keybindings.Current, "show_agent"))),
+		keyStyle.Render(fmt.Sprintf("%s edit  %s do  %s resume  %s fork", keyLabel(m.keybindings.Current, "edit_doc"), keyLabel(m.keybindings.Current, "run_do"), keyLabel(m.keybindings.Current, "resume"), keyLabel(m.keybindings.Current, "fork_session"))),
+		keyStyle.Render(fmt.Sprintf("%s refresh", keyLabel(m.keybindings.Global, "refresh"))),
+		keyStyle.Render(fmt.Sprintf("%s help", keyLabel(m.keybindings.Global, "toggle_help"))),
+		keyStyle.Render(fmt.Sprintf("%s quit", keyLabel(m.keybindings.Global, "quit"))),
 	}
 
 	line := statusStyle.Render(status)
@@ -1221,9 +1325,20 @@ func (m model) tasksListContent() string {
 	return strings.Join(lines, "\n")
 }
 
-func (m *model) syncCurrentViewport() {
+func (m *model) syncCurrentViewport(forceTop bool) {
+	taskID := ""
+	if task := m.selectedTask(); task != nil {
+		taskID = task.Meta.ID
+	}
+	if !forceTop && (taskID != m.currentViewportTaskID || m.currentViewMode != m.currentViewportView) {
+		forceTop = true
+	}
 	m.currentViewport.SetContent(m.currentContent())
-	m.currentViewport.GotoTop()
+	if forceTop {
+		m.currentViewport.GotoTop()
+	}
+	m.currentViewportTaskID = taskID
+	m.currentViewportView = m.currentViewMode
 }
 
 func (m model) currentContent() string {
@@ -1234,6 +1349,9 @@ func (m model) currentContent() string {
 
 	mode := m.currentViewMode
 	if mode == viewAuto {
+		if task.Status.Status == "RUNNING" {
+			return m.decorateCurrentContent(*task, "agent output", m.agentOutputContent(*task))
+		}
 		if content, err := readTaskFile(task.ResultFile); err == nil && strings.TrimSpace(content) != "# Result\n\nSummary:" {
 			return m.decorateCurrentContent(*task, "result.md", content)
 		}
@@ -1405,9 +1523,11 @@ func (m model) agentOutputContent(task tasker.Task) string {
 	lines := make([]string, 0, 8)
 	session, output, err := tasker.ReadTaskAgentOutput(&task)
 	if err == nil {
-		lines = append(lines,
-			fmt.Sprintf("Source: %s session %s", session.Agent, session.ID),
-		)
+		source := fmt.Sprintf("Source: %s session %s", session.Agent, session.ID)
+		if strings.TrimSpace(session.ID) == "" {
+			source = "Source: task live output"
+		}
+		lines = append(lines, source)
 		if session.RecordedAt != "" {
 			lines = append(lines, "Recorded: "+session.RecordedAt)
 		}
@@ -1415,10 +1535,10 @@ func (m model) agentOutputContent(task tasker.Task) string {
 		return strings.Join(lines, "\n")
 	}
 
-	if m.activeJob != nil && m.activeJob.TaskID == task.Meta.ID && m.activeJob.Running {
+	if task.Status.Status == "RUNNING" {
 		return strings.Join([]string{
 			"Waiting for Codex session output...",
-			"Started: " + m.activeJob.Started.Format(time.RFC3339),
+			"The task is still running, but no readable agent transcript is available yet.",
 		}, "\n")
 	}
 
@@ -1595,39 +1715,66 @@ func (m *model) openSelectedTaskInEditor() (tea.Model, tea.Cmd) {
 	})
 }
 
+func (m *model) resumeSelectedTask(fork bool) (tea.Model, tea.Cmd) {
+	task := m.selectedTask()
+	if task == nil {
+		return m.withError("select a task first"), nil
+	}
+
+	cmd, err := tasker.ResumeTaskCommand(m.root, task, fork)
+	if err != nil {
+		return m.withError(err.Error()), nil
+	}
+
+	status := "Resumed task " + task.Meta.ID
+	if fork {
+		status = "Forked task " + task.Meta.ID
+	}
+	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return externalDoneMsg{
+			Status:     status,
+			SelectedID: task.Meta.ID,
+			Err:        err,
+			Refresh:    true,
+		}
+	})
+}
+
 func (m model) renderHelp() string {
 	lines := []string{
 		"Global",
-		"0/1/2 focus current, tasks, and workers panels",
-		"/ focuses the task filter",
-		"S cycles status filters, T cycles type filters",
-		"R refreshes data, ? toggles help, q quits",
+		fmt.Sprintf("%s/%s/%s focus current, tasks, and workers panels", keyLabel(m.keybindings.Global, "focus_current"), keyLabel(m.keybindings.Global, "focus_tasks"), keyLabel(m.keybindings.Global, "focus_workers")),
+		fmt.Sprintf("%s focuses the task filter", keyLabel(m.keybindings.Global, "filter")),
+		fmt.Sprintf("%s cycles status filters, %s cycles type filters", keyLabel(m.keybindings.Global, "cycle_status_filter"), keyLabel(m.keybindings.Global, "cycle_type_filter")),
+		fmt.Sprintf("%s refreshes data, %s toggles help, %s quits", keyLabel(m.keybindings.Global, "refresh"), keyLabel(m.keybindings.Global, "toggle_help"), keyLabel(m.keybindings.Global, "quit")),
 		"",
 		"Tasks",
-		"up/down move selection",
-		"enter toggles subtasks and opens the current-view panel",
-		"n new task, a add child, m edit meta, c checkout",
-		"u import tasks, I create import template, d delete",
-		"e open task/project documents in the configured editor",
-		"x run `tasker do`, s resume session, f fork session",
+		fmt.Sprintf("%s/%s move selection", keyLabel(m.keybindings.Tasks, "move_up"), keyLabel(m.keybindings.Tasks, "move_down")),
+		fmt.Sprintf("%s toggles subtasks and opens the current-view panel", keyLabel(m.keybindings.Tasks, "open_current")),
+		fmt.Sprintf("%s new task, %s add child, %s edit meta, %s checkout", keyLabel(m.keybindings.Tasks, "new_task"), keyLabel(m.keybindings.Tasks, "add_child"), keyLabel(m.keybindings.Tasks, "edit_meta"), keyLabel(m.keybindings.Tasks, "checkout")),
+		fmt.Sprintf("%s import tasks, %s create import template, %s delete", keyLabel(m.keybindings.Tasks, "import_tasks"), keyLabel(m.keybindings.Tasks, "create_import_template"), keyLabel(m.keybindings.Tasks, "delete_task")),
+		fmt.Sprintf("%s open task/project documents in the configured editor", keyLabel(m.keybindings.Tasks, "open_doc")),
+		fmt.Sprintf("%s opens the selected task's agent output", keyLabel(m.keybindings.Tasks, "open_output")),
+		fmt.Sprintf("%s run `tasker do`, %s run `tasker resume`, %s fork a stored session", keyLabel(m.keybindings.Tasks, "run_do"), keyLabel(m.keybindings.Tasks, "resume"), keyLabel(m.keybindings.Tasks, "fork_session")),
 		"",
 		"Current View",
-		"t shows task.md, r shows result.md, s shows status, w shows agent output",
-		"e opens the selected task or result in your editor",
-		"x runs `tasker do`, S resumes a stored session, F forks one",
+		fmt.Sprintf("%s shows task.md, %s shows result.md, %s shows status, %s/%s show agent output", keyLabel(m.keybindings.Current, "show_task"), keyLabel(m.keybindings.Current, "show_result"), keyLabel(m.keybindings.Current, "show_status"), keyLabel(m.keybindings.Current, "show_agent"), keyLabel(m.keybindings.Current, "open_output")),
+		fmt.Sprintf("%s opens the selected task or result in your editor", keyLabel(m.keybindings.Current, "edit_doc")),
+		fmt.Sprintf("%s run `tasker do`, %s run `tasker resume`, %s fork a stored session", keyLabel(m.keybindings.Current, "run_do"), keyLabel(m.keybindings.Current, "resume"), keyLabel(m.keybindings.Current, "fork_session")),
 		"",
 		"Workers",
-		"up/down move between running tasks",
-		"enter opens the selected task's agent output",
+		fmt.Sprintf("%s/%s move between running tasks", keyLabel(m.keybindings.Workers, "move_up"), keyLabel(m.keybindings.Workers, "move_down")),
+		fmt.Sprintf("%s opens the selected task's agent output", keyLabel(m.keybindings.Workers, "open_output")),
+		fmt.Sprintf("%s confirms stopping the selected running task", keyLabel(m.keybindings.Workers, "stop_task")),
 		"",
 		"Forms",
-		"tab moves between fields",
-		"left/right cycle select fields",
-		"ctrl+s submits, esc cancels",
+		fmt.Sprintf("%s moves between fields", keyLabel(m.keybindings.Form, "next_field")),
+		fmt.Sprintf("%s/%s cycle select fields", keyLabel(m.keybindings.Form, "prev_option"), keyLabel(m.keybindings.Form, "next_option")),
+		fmt.Sprintf("%s submits, %s cancels", keyLabel(m.keybindings.Form, "submit"), keyLabel(m.keybindings.Form, "cancel")),
 		"",
-		"Delete confirmation",
-		"left/right toggle confirm",
-		"r toggles recursive delete",
+		"Confirmations",
+		fmt.Sprintf("%s toggle confirm", keyLabel(m.keybindings.Confirm, "toggle_choice")),
+		fmt.Sprintf("%s toggles recursive delete when deleting tasks", keyLabel(m.keybindings.Confirm, "toggle_recursive")),
 	}
 	return centeredBox("Help", strings.Join(lines, "\n"), minInt(88, m.width-6))
 }
@@ -1650,7 +1797,7 @@ func (m model) renderForm() string {
 		}
 		lines = append(lines, "")
 	}
-	lines = append(lines, "ctrl+s submit  esc cancel")
+	lines = append(lines, fmt.Sprintf("%s submit  %s cancel", keyLabel(m.keybindings.Form, "submit"), keyLabel(m.keybindings.Form, "cancel")))
 	return centeredBox(m.form.Title, strings.Join(lines, "\n"), minInt(92, m.width-6))
 }
 
@@ -1671,7 +1818,7 @@ func (m model) renderSessionPicker() string {
 		lines = append(lines, marker+session.Agent+" "+session.ID)
 		lines = append(lines, "    "+command)
 	}
-	lines = append(lines, "", "enter run  esc cancel")
+	lines = append(lines, "", fmt.Sprintf("%s run  %s cancel", keyLabel(m.keybindings.Session, "select"), keyLabel(m.keybindings.Session, "cancel")))
 	return centeredBox("Stored Sessions", strings.Join(lines, "\n"), minInt(96, m.width-6))
 }
 
@@ -1686,10 +1833,14 @@ func (m model) renderConfirm() string {
 	lines := []string{
 		m.confirm.Body,
 		"",
-		fmt.Sprintf("Recursive delete: %t  (press r to toggle)", m.confirm.Recursive),
-		"",
-		choiceNo + "   " + choiceYes,
 	}
+	if m.confirm.Kind == modalDelete {
+		lines = append(lines,
+			fmt.Sprintf("Recursive delete: %t  (press %s to toggle)", m.confirm.Recursive, keyLabel(m.keybindings.Confirm, "toggle_recursive")),
+			"",
+		)
+	}
+	lines = append(lines, choiceNo+"   "+choiceYes)
 	return centeredBox(m.confirm.Title, strings.Join(lines, "\n"), minInt(72, m.width-6))
 }
 
@@ -1924,7 +2075,7 @@ func renderTaskStatusBadge(status string) string {
 		color = lipgloss.Color("214")
 	case "DONE":
 		color = lipgloss.Color("42")
-	case "BLOCKED":
+	case "CANCELLED", "BLOCKED":
 		color = lipgloss.Color("196")
 	case "HANDOFF", "REVIEW", "AWAITING_ACTION":
 		color = lipgloss.Color("170")

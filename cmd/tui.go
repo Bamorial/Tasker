@@ -8,15 +8,20 @@ import (
 
 var runTUI = tui.Run
 
+func runTUIFromWorkspace() error {
+	root, err := tasker.FindWorkspaceRoot(".")
+	if err != nil {
+		return err
+	}
+	return runTUI(root)
+}
+
 var tuiCmd = &cobra.Command{
-	Use:   "tui",
-	Short: "Open the Tasker terminal UI",
-	Args:  cobra.NoArgs,
+	Use:    "tui",
+	Short:  "Open the Tasker terminal UI",
+	Hidden: true,
+	Args:   cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		root, err := tasker.FindWorkspaceRoot(".")
-		if err != nil {
-			return err
-		}
-		return runTUI(root)
+		return runTUIFromWorkspace()
 	},
 }

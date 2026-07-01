@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -491,6 +492,52 @@ func TestDoTaskStoresHeadlessCodexSession(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Started Codex session: session-headless-123") {
 		t.Fatalf("expected command output to include session id, got %q", stdout.String())
 	}
+	liveOutput, err := os.ReadFile(TaskLiveOutputPath(task))
+	if err != nil {
+		t.Fatalf("ReadFile live output: %v", err)
+	}
+	if !strings.Contains(string(liveOutput), "Working headlessly") || !strings.Contains(string(liveOutput), "Finished task") {
+		t.Fatalf("expected live output log to include codex transcript, got %q", string(liveOutput))
+	}
+}
+
+func TestDoTaskAddsSkipGitRepoCheckOutsideGitWorkspace(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	unsetEnvForTest(t, "CODEX_THREAD_ID")
+	unsetEnvForTest(t, "TASKER_SESSION_ID")
+	unsetEnvForTest(t, "TASKER_SESSION_AGENT")
+	unsetEnvForTest(t, "TASKER_SESSION_RESUME_COMMAND")
+	unsetEnvForTest(t, "TASKER_SESSION_FORK_COMMAND")
+
+	created, err := CreateTask(root, CreateTaskInput{Title: "Skip git check", Type: "bug"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	originalExecCommand := execCommand
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		helperArgs := append([]string{"-test.run=TestHelperProcessHeadlessCodexRequiresSkipGitRepoCheck", "--", name}, args...)
+		cmd := exec.Command(os.Args[0], helperArgs...)
+		cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS_SKIP_GIT_CHECK=1")
+		return cmd
+	}
+	t.Cleanup(func() {
+		execCommand = originalExecCommand
+	})
+
+	var stdout strings.Builder
+	var stderr strings.Builder
+	if err := DoTask(root, created.ID, &stdout, &stderr); err != nil {
+		t.Fatalf("DoTask: %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "Started Codex session: session-skip-git-123") {
+		t.Fatalf("expected stored session output, got %q", stdout.String())
+	}
 }
 
 func TestDoTaskSuppressesStdinNoticeWithoutLoader(t *testing.T) {
@@ -549,6 +596,41 @@ func TestHelperProcessHeadlessCodex(t *testing.T) {
 	fmt.Fprintln(os.Stdout, `{"type":"session_meta","payload":{"session_id":"session-headless-123","id":"session-headless-123"}}`)
 	fmt.Fprintln(os.Stdout, `{"type":"event_msg","payload":{"type":"agent_message","message":"Working headlessly"}}`)
 	fmt.Fprintln(os.Stdout, `{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Finished task"}]}}`)
+	os.Exit(0)
+}
+
+func TestHelperProcessHeadlessCodexRequiresSkipGitRepoCheck(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS_SKIP_GIT_CHECK") != "1" {
+		return
+	}
+
+	args := os.Args
+	for idx, arg := range args {
+		if arg == "--" && idx+1 < len(args) {
+			args = args[idx+1:]
+			break
+		}
+	}
+
+	if len(args) == 0 || args[0] != "codex" {
+		fmt.Fprintf(os.Stderr, "unexpected helper args: %q\n", args)
+		os.Exit(2)
+	}
+
+	found := false
+	for _, arg := range args[1:] {
+		if arg == "--skip-git-repo-check" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		fmt.Fprintln(os.Stderr, "missing --skip-git-repo-check")
+		os.Exit(3)
+	}
+
+	fmt.Fprintln(os.Stdout, `{"type":"session_meta","payload":{"session_id":"session-skip-git-123","id":"session-skip-git-123"}}`)
+	fmt.Fprintln(os.Stdout, `{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Verified skip flag"}]}}`)
 	os.Exit(0)
 }
 
@@ -698,6 +780,116 @@ func TestStartDetachedDoTaskLaunchesCurrentExecutable(t *testing.T) {
 	}
 
 	t.Fatalf("expected detached helper to write %s", markerPath)
+}
+
+func TestStopTaskExecutionSignalsProcessAndMarksTaskCancelled(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	created, err := CreateTask(root, CreateTaskInput{Title: "Stop me", Type: "feature"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	task, err := GetTask(root, created.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if err := UpdateTaskStatus(task, "RUNNING", "codex", time.Now()); err != nil {
+		t.Fatalf("UpdateTaskStatus: %v", err)
+	}
+
+	cmd := exec.Command("sh", "-c", "trap 'exit 0' TERM; while true; do sleep 1; done")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start helper process: %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+		}
+	})
+
+	if err := WriteTaskExecutionState(task, TaskExecutionState{
+		PID:       cmd.Process.Pid,
+		PGID:      cmd.Process.Pid,
+		StartedAt: time.Now().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("WriteTaskExecutionState: %v", err)
+	}
+
+	if err := StopTaskExecution(root, created.ID); err != nil {
+		t.Fatalf("StopTaskExecution: %v", err)
+	}
+
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- cmd.Wait()
+	}()
+
+	select {
+	case err := <-waitDone:
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == -1 {
+				// Terminated by signal on Unix. This is acceptable for the stop flow.
+			} else {
+				t.Fatalf("wait helper process: %v", err)
+			}
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected helper process to exit after StopTaskExecution")
+	}
+
+	reloaded, err := GetTask(root, created.ID)
+	if err != nil {
+		t.Fatalf("GetTask reload: %v", err)
+	}
+	if reloaded.Status.Status != "CANCELLED" {
+		t.Fatalf("expected CANCELLED status, got %#v", reloaded.Status)
+	}
+	if _, err := os.Stat(TaskExecutionStatePath(reloaded)); !os.IsNotExist(err) {
+		t.Fatalf("expected execution state to be removed, got err=%v", err)
+	}
+}
+
+func TestResumeTaskCommandUsesTaskerResume(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	created, err := CreateTask(root, CreateTaskInput{Title: "Resume me", Type: "feature"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	task, err := GetTask(root, created.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+
+	originalExecutablePath := currentExecutablePath
+	currentExecutablePath = func() (string, error) {
+		return "/tmp/tasker-bin", nil
+	}
+	t.Cleanup(func() {
+		currentExecutablePath = originalExecutablePath
+	})
+
+	cmd, err := ResumeTaskCommand(root, task, false)
+	if err != nil {
+		t.Fatalf("ResumeTaskCommand: %v", err)
+	}
+	if cmd.Path != "/tmp/tasker-bin" {
+		t.Fatalf("expected executable path, got %q", cmd.Path)
+	}
+	if len(cmd.Args) != 3 || cmd.Args[1] != "resume" || cmd.Args[2] != created.ID {
+		t.Fatalf("unexpected args: %#v", cmd.Args)
+	}
+	if cmd.Dir != root {
+		t.Fatalf("expected dir %q, got %q", root, cmd.Dir)
+	}
 }
 
 func TestSessionsForActionFiltersByAvailableCommand(t *testing.T) {
@@ -1391,6 +1583,7 @@ func TestValidTaskStatusesSorted(t *testing.T) {
 	want := []string{
 		"AWAITING_ACTION",
 		"BLOCKED",
+		"CANCELLED",
 		"DONE",
 		"HANDOFF",
 		"IN_PROGRESS",

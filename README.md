@@ -40,7 +40,7 @@ Each task folder contains:
 
 When Tasker detects an active agent session while creating a task, it stores a machine-readable session index at `sessions/index.json` and mirrors that session metadata into `status.json`.
 
-Tasker recognizes these task status values in `status.json`: `NEW`, `PLANNED`, `RUNNING`, `IN_PROGRESS`, `HANDOFF`, `AWAITING_ACTION`, `REVIEW`, `BLOCKED`, and `DONE`.
+Tasker recognizes these task status values in `status.json`: `NEW`, `PLANNED`, `RUNNING`, `IN_PROGRESS`, `HANDOFF`, `AWAITING_ACTION`, `REVIEW`, `BLOCKED`, `CANCELLED`, and `DONE`.
 
 Agents should not create task folders manually under `.tasker/tasks/`. When a new task is needed, use `tasker new`, `tasker add`, or `tasker import` so Tasker can keep metadata, workspace state, and session tracking consistent.
 
@@ -82,10 +82,9 @@ Tasker currently implements:
 - `tasker tree`
 - `tasker status`
 - `tasker status <id>`
-- `tasker tui`
 - `tasker version`
 
-Running `tasker` with no arguments prints `Hello!` on the first line and then shows the root help output.
+Running `tasker` with no arguments opens the native Tasker terminal UI. Use `tasker help` to see the command list.
 
 ## Installation And Build
 
@@ -185,7 +184,7 @@ tasker status
 Open the terminal UI:
 
 ```bash
-tasker tui
+tasker
 ```
 
 ## Configuration
@@ -203,6 +202,82 @@ git:
   checkout_branch: false
   commit_per_subtask: true
   branch_prefix: "task"
+
+tui:
+  keybindings:
+    global:
+      quit: ["ctrl+c", "q"]
+      focus_current: ["0"]
+      focus_tasks: ["1"]
+      focus_workers: ["2"]
+      toggle_help: ["?"]
+      refresh: ["R"]
+      filter: ["/"]
+      cycle_status_filter: ["S"]
+      cycle_type_filter: ["T"]
+    tasks:
+      move_up: ["up", "k"]
+      move_down: ["down", "j"]
+      page_up: ["pgup"]
+      page_down: ["pgdown"]
+      new_task: ["n"]
+      add_child: ["a"]
+      edit_meta: ["m"]
+      checkout: ["c"]
+      import_tasks: ["u"]
+      create_import_template: ["I"]
+      delete_task: ["d"]
+      open_doc: ["e"]
+      run_do: ["x"]
+      resume: ["*"]
+      fork_session: ["f"]
+      open_output: ["o"]
+      open_current: ["enter"]
+    current:
+      show_task: ["t"]
+      show_result: ["r"]
+      show_status: ["s"]
+      show_agent: ["w"]
+      open_output: ["o"]
+      edit_doc: ["e"]
+      run_do: ["x"]
+      resume: ["*"]
+      fork_session: ["F"]
+    workers:
+      move_up: ["up", "k"]
+      move_down: ["down", "j"]
+      page_up: ["pgup"]
+      page_down: ["pgdown"]
+      open_output: ["enter"]
+      stop_task: ["d"]
+    viewport:
+      line_up: ["up", "k", "ctrl+p"]
+      line_down: ["down", "j", "ctrl+n"]
+      page_up: ["pgup", "b"]
+      page_down: ["pgdown", "space"]
+      top: ["g", "home"]
+      bottom: ["G", "end"]
+    filter:
+      cancel: ["esc"]
+      apply: ["enter"]
+    form:
+      cancel: ["esc"]
+      next_field: ["tab", "down"]
+      prev_field: ["shift+tab", "up"]
+      prev_option: ["left"]
+      next_option: ["right"]
+      submit: ["ctrl+s"]
+      submit_or_next: ["enter"]
+    session:
+      cancel: ["esc"]
+      move_up: ["up", "k"]
+      move_down: ["down", "j"]
+      select: ["enter"]
+    confirm:
+      cancel: ["esc"]
+      toggle_choice: ["left", "h", "right", "l"]
+      toggle_recursive: ["r"]
+      accept: ["enter"]
 ```
 
 Behavior notes:
@@ -211,6 +286,8 @@ Behavior notes:
 - if neither is set, editor-opening commands print the target path instead
 - `git.checkout_branch: true` allows `tasker checkout <id>` to auto-create or reuse the generated branch
 - `git.branch_prefix` defaults to `task`
+- `tui.keybindings` overrides the built-in Tasker TUI shortcuts by action name
+- any omitted keybinding actions fall back to the defaults above
 
 Generated branch format:
 
@@ -394,7 +471,7 @@ tasker checkout 013 --existing-branch feature/manual-link
 tasker checkout 013 --print-path
 ```
 
-### `tasker tui`
+### `tasker`
 
 Opens the native Tasker terminal UI.
 
@@ -403,28 +480,26 @@ Behavior:
 - loads tasks, status counts, and the current workspace directly from `internal/tasker`
 - shows a single lazygit-style screen with three numbered panels
 - keeps the task tree and worker output in the left column and the selected task view on the right
-- supports keyboard-driven `new`, `add`, `meta`, `checkout`, `import`, `import template`, `delete`, `do`, `resume`, and `fork` flows
+- supports keyboard-driven `new`, `add`, `meta`, `checkout`, `import`, `import template`, `delete`, `stop`, `do`, `resume`, and `fork` flows
 - uses external subprocesses for editor launches, detached `tasker do` runs, and stored session resume/fork commands
 - refreshes the task tree, current view, and worker panes after mutating actions
+- watches `.tasker/` for external file changes so task status, results, and live output stay in sync without manual refresh
+- can read a running task's Codex transcript from `sessions/execution.json` plus the persisted `~/.codex/sessions` data even before the task-local session index is written
 - defaults `Open editor` to `open` in task/import forms when an editor is configured via `.tasker/config.yaml` or `$EDITOR`
 
 Key workflows:
 
-- `0`, `1`, `2`: focus the current-view, task-tree, and workers panels
-- `/`: focus the task filter
-- `S` and `T`: cycle status and type filters
-- `enter`: expand/collapse subtasks from the tree and open the selected task on the right
-- `enter` in the workers panel: open the selected running task's agent output on the right
-- `t`, `r`, `s`, `w`: switch the current-view panel between `task.md`, `result.md`, task status, and agent output
-- `n`, `a`, `m`, `c`, `u`, `I`, `d`, `e`, `x`, `s`, `f`: open task actions from the tree panel
-- `e`, `x`, `S`, `F`: edit, run, resume, or fork from the current-view panel
-- `R`: refresh data
-- `?`: show in-app help
+- all defaults come from `.tasker/config.yaml` under `tui.keybindings`
+- `global` controls panel focus, help, refresh, filtering, and filter cycling
+- `tasks` controls task-tree navigation plus task actions like new, add, checkout, delete, do, resume, fork, and open output
+- `current` controls the right-hand panel view switching and task actions
+- `workers` controls the running-task list navigation, output opening, and stop confirmation entrypoint
+- `viewport`, `filter`, `form`, `session`, and `confirm` control the shared modal and scrolling shortcuts
 
 Example:
 
 ```bash
-tasker tui
+tasker
 ```
 
 ### `tasker open <id>`
@@ -478,6 +553,7 @@ Behavior:
 - suppresses the noisy `Reading additional input from stdin...` notice from the underlying exec process
 - captures the new session ID from the machine-readable exec stream when available
 - falls back to the persisted `~/.codex/sessions` metadata for matching `codex_exec` runs when the stream does not expose `session_meta`
+- writes enough execution metadata for the TUI to find the matching persisted transcript while the run is still in progress
 - stores the session in both `status.json` and `sessions/index.json`
 - preserves any final task status written by the agent, and otherwise promotes the successful run to `DONE`
 - leaves the task resumable later with `tasker resume <id>`
@@ -685,7 +761,7 @@ Use this when each task should have isolated Git work tied to its task ID and sl
 - Tasker does not require Git branch automation to be useful.
 - Opening files depends on either `.tasker/config.yaml` `editor` or `$EDITOR`.
 - If `CODEX_THREAD_ID` is present, new tasks store it and show `codex resume <id>` and `codex fork <id>` in `tasker status <id>`.
-- `tasker do <id>` starts a fresh headless `codex exec` run and stores its session ID directly from the exec event stream.
+- `tasker do <id>` starts a fresh headless `codex exec` run, and Tasker can recover its transcript/session from persisted `codex_exec` metadata when the live exec stream does not expose that data immediately.
 - `tasker resume <id>` uses the stored session commands and prompts when more than one session can be resumed or forked.
 - For other agents, you can inject session metadata with `TASKER_SESSION_ID`, `TASKER_SESSION_AGENT`, `TASKER_SESSION_RESUME_COMMAND`, and `TASKER_SESSION_FORK_COMMAND`.
 

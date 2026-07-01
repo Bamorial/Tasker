@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -54,12 +55,16 @@ func DoTask(root, id string, out, errOut io.Writer) error {
 	if err := WriteCurrentWorkspace(root, task, CurrentWorkspaceInput{}); err != nil {
 		return err
 	}
-	cmd := execCommand("codex",
-		"exec",
-		"--json",
-		"--cd", root,
-		buildTaskerDoPrompt(task),
-	)
+	if err := ResetTaskLiveOutput(task); err != nil {
+		return err
+	}
+	if err := WriteTaskExecutionState(task, CurrentTaskExecutionState(startedAt)); err != nil {
+		return err
+	}
+	defer func() {
+		_ = ClearTaskExecutionState(task)
+	}()
+	cmd := execCommand("codex", buildCodexExecArgs(root, buildTaskerDoPrompt(task))...)
 	cmd.Dir = root
 
 	devNull, err := os.Open(os.DevNull)
@@ -81,6 +86,12 @@ func DoTask(root, id string, out, errOut io.Writer) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	liveOutputFile, err := os.OpenFile(TaskLiveOutputPath(task), os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
+	if err != nil {
+		return err
+	}
+	defer liveOutputFile.Close()
+	out = io.MultiWriter(out, liveOutputFile)
 
 	stderrDone := make(chan error, 1)
 	go func() {
@@ -145,6 +156,24 @@ func DoTask(root, id string, out, errOut io.Writer) error {
 	return finalizeDoTaskStatus(root, task.Meta.ID, startedAt)
 }
 
+func buildCodexExecArgs(root, prompt string) []string {
+	args := []string{
+		"exec",
+		"--json",
+		"--cd", root,
+	}
+	if shouldSkipGitRepoCheck(root) {
+		args = append(args, "--skip-git-repo-check")
+	}
+	args = append(args, prompt)
+	return args
+}
+
+func shouldSkipGitRepoCheck(root string) bool {
+	_, err := OpenGitRepo(root)
+	return err != nil
+}
+
 func StartDetachedDoTask(root, id string) error {
 	if _, err := GetTask(root, id); err != nil {
 		return err
@@ -166,6 +195,7 @@ func StartDetachedDoTask(root, id string) error {
 	cmd.Stdin = devNull
 	cmd.Stdout = devNull
 	cmd.Stderr = devNull
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {
 		return err
@@ -195,7 +225,7 @@ func finalizeDoTaskStatus(root, id string, startedAt time.Time) error {
 	}
 
 	switch task.Status.Status {
-	case "BLOCKED", "AWAITING_ACTION", "HANDOFF", "REVIEW", "DONE":
+	case "BLOCKED", "AWAITING_ACTION", "HANDOFF", "REVIEW", "DONE", "CANCELLED":
 		return nil
 	case "NEW", "RUNNING":
 		return UpdateTaskStatus(task, "DONE", "codex", startedAt)

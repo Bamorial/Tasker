@@ -18,6 +18,7 @@ coverage.out
 /.gomodcache/
 /.tmp/
 /.aptly/
+/.cache
 
 # Release and package artifacts
 *.deb

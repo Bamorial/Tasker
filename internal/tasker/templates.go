@@ -104,6 +104,82 @@ git:
   checkout_branch: false
   commit_per_subtask: true
   branch_prefix: "task"
+
+tui:
+  keybindings:
+    global:
+      quit: ["ctrl+c", "q"]
+      focus_current: ["0"]
+      focus_tasks: ["1"]
+      focus_workers: ["2"]
+      toggle_help: ["?"]
+      refresh: ["R"]
+      filter: ["/"]
+      cycle_status_filter: ["S"]
+      cycle_type_filter: ["T"]
+    tasks:
+      move_up: ["up", "k"]
+      move_down: ["down", "j"]
+      page_up: ["pgup"]
+      page_down: ["pgdown"]
+      new_task: ["n"]
+      add_child: ["a"]
+      edit_meta: ["m"]
+      checkout: ["c"]
+      import_tasks: ["u"]
+      create_import_template: ["I"]
+      delete_task: ["d"]
+      open_doc: ["e"]
+      run_do: ["x"]
+      resume: ["*"]
+      fork_session: ["f"]
+      open_output: ["o"]
+      open_current: ["enter"]
+    current:
+      show_task: ["t"]
+      show_result: ["r"]
+      show_status: ["s"]
+      show_agent: ["w"]
+      open_output: ["o"]
+      edit_doc: ["e"]
+      run_do: ["x"]
+      resume: ["*"]
+      fork_session: ["F"]
+    workers:
+      move_up: ["up", "k"]
+      move_down: ["down", "j"]
+      page_up: ["pgup"]
+      page_down: ["pgdown"]
+      open_output: ["enter"]
+      stop_task: ["d"]
+    viewport:
+      line_up: ["up", "k", "ctrl+p"]
+      line_down: ["down", "j", "ctrl+n"]
+      page_up: ["pgup", "b"]
+      page_down: ["pgdown", "space"]
+      top: ["g", "home"]
+      bottom: ["G", "end"]
+    filter:
+      cancel: ["esc"]
+      apply: ["enter"]
+    form:
+      cancel: ["esc"]
+      next_field: ["tab", "down"]
+      prev_field: ["shift+tab", "up"]
+      prev_option: ["left"]
+      next_option: ["right"]
+      submit: ["ctrl+s"]
+      submit_or_next: ["enter"]
+    session:
+      cancel: ["esc"]
+      move_up: ["up", "k"]
+      move_down: ["down", "j"]
+      select: ["enter"]
+    confirm:
+      cancel: ["esc"]
+      toggle_choice: ["left", "h", "right", "l"]
+      toggle_recursive: ["r"]
+      accept: ["enter"]
 `
 }
 

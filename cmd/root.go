@@ -1,17 +1,13 @@
 package cmd
 
-import (
-	"fmt"
-
-	"github.com/spf13/cobra"
-)
+import "github.com/spf13/cobra"
 
 var rootCmd = &cobra.Command{
 	Use:   "tasker",
 	Short: "Tasker is a CLI-first universal agent workspace",
+	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Fprintln(cmd.OutOrStdout(), "Hello!")
-		return cmd.Help()
+		return runTUIFromWorkspace()
 	},
 }
 

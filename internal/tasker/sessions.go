@@ -23,6 +23,11 @@ type TaskSessionIndex struct {
 	Sessions []TaskSession `json:"sessions"`
 }
 
+type persistedCodexExecSessionMatch struct {
+	ID         string
+	RecordedAt time.Time
+}
+
 type persistedCodexSessionMeta struct {
 	Type      string `json:"type"`
 	Timestamp string `json:"timestamp"`
@@ -160,6 +165,27 @@ func StoreTaskSession(task *Task, session TaskSession) error {
 	return writeTaskSessionIndex(task.Path, task.Status.Sessions)
 }
 
+func TaskLiveOutputPath(task *Task) string {
+	return filepath.Join(task.Path, "sessions", "live-output.log")
+}
+
+func ResetTaskLiveOutput(task *Task) error {
+	return os.WriteFile(TaskLiveOutputPath(task), nil, 0o644)
+}
+
+func ReadTaskLiveOutput(task *Task) (string, error) {
+	data, err := os.ReadFile(TaskLiveOutputPath(task))
+	if err != nil {
+		return "", err
+	}
+
+	content := strings.TrimSpace(string(data))
+	if content == "" {
+		return "", os.ErrNotExist
+	}
+	return content, nil
+}
+
 func writeTaskSessionIndex(taskPath string, sessions []TaskSession) error {
 	return writeJSON(filepath.Join(taskPath, "sessions", "index.json"), TaskSessionIndex{
 		Sessions: sessions,
@@ -167,22 +193,32 @@ func writeTaskSessionIndex(taskPath string, sessions []TaskSession) error {
 }
 
 func findPersistedCodexExecSessionID(root string, notBefore time.Time) (string, bool, error) {
-	homeDir, err := os.UserHomeDir()
+	match, ok, err := findPersistedCodexExecSession(root, notBefore)
 	if err != nil {
 		return "", false, err
+	}
+	if !ok {
+		return "", false, nil
+	}
+	return match.ID, true, nil
+}
+
+func findPersistedCodexExecSession(root string, notBefore time.Time) (persistedCodexExecSessionMatch, bool, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return persistedCodexExecSessionMatch{}, false, err
 	}
 
 	sessionsRoot := filepath.Join(homeDir, ".codex", "sessions")
 	if _, err := os.Stat(sessionsRoot); err != nil {
 		if os.IsNotExist(err) {
-			return "", false, nil
+			return persistedCodexExecSessionMatch{}, false, nil
 		}
-		return "", false, err
+		return persistedCodexExecSessionMatch{}, false, err
 	}
 
 	rootKey := normalizeSessionCWD(root)
-	bestID := ""
-	var bestTime time.Time
+	best := persistedCodexExecSessionMatch{}
 
 	err = filepath.WalkDir(sessionsRoot, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -202,19 +238,21 @@ func findPersistedCodexExecSessionID(root string, notBefore time.Time) (string, 
 		if normalizeSessionCWD(cwd) != rootKey {
 			return nil
 		}
-		if bestID == "" || recordedAt.After(bestTime) {
-			bestID = sessionID
-			bestTime = recordedAt
+		if best.ID == "" || recordedAt.After(best.RecordedAt) {
+			best = persistedCodexExecSessionMatch{
+				ID:         sessionID,
+				RecordedAt: recordedAt,
+			}
 		}
 		return nil
 	})
 	if err != nil {
-		return "", false, err
+		return persistedCodexExecSessionMatch{}, false, err
 	}
-	if bestID == "" {
-		return "", false, nil
+	if best.ID == "" {
+		return persistedCodexExecSessionMatch{}, false, nil
 	}
-	return bestID, true, nil
+	return best, true, nil
 }
 
 func readPersistedCodexSessionMeta(path string) (string, time.Time, string, bool, error) {
@@ -294,7 +332,53 @@ func ReadTaskAgentOutput(task *Task) (TaskSession, string, error) {
 		}
 	}
 
+	session, output, err := ReadTaskExecutionOutput(task)
+	if err == nil {
+		return session, output, nil
+	}
+	if !os.IsNotExist(err) {
+		return session, "", err
+	}
+
+	output, err = ReadTaskLiveOutput(task)
+	if err == nil {
+		return TaskSession{Agent: "codex", Source: "task live output"}, output, nil
+	}
+	if !os.IsNotExist(err) {
+		return TaskSession{Agent: "codex", Source: "task live output"}, "", err
+	}
+
 	return TaskSession{}, "", os.ErrNotExist
+}
+
+func ReadTaskExecutionOutput(task *Task) (TaskSession, string, error) {
+	state, err := ReadTaskExecutionState(task)
+	if err != nil {
+		return TaskSession{}, "", err
+	}
+	startedAt, err := time.Parse(time.RFC3339, strings.TrimSpace(state.StartedAt))
+	if err != nil {
+		return TaskSession{}, "", err
+	}
+
+	root, err := FindWorkspaceRoot(task.Path)
+	if err != nil {
+		return TaskSession{}, "", err
+	}
+
+	match, ok, err := findPersistedCodexExecSession(root, startedAt)
+	if err != nil {
+		return TaskSession{}, "", err
+	}
+	if !ok {
+		return TaskSession{}, "", os.ErrNotExist
+	}
+
+	output, err := ReadCodexSessionOutput(match.ID)
+	if err != nil {
+		return newCodexTaskSession(match.ID, "codex exec session file", match.RecordedAt), "", err
+	}
+	return newCodexTaskSession(match.ID, "codex exec session file", match.RecordedAt), output, nil
 }
 
 func ReadCodexSessionOutput(sessionID string) (string, error) {
@@ -353,6 +437,9 @@ func ReadCodexSessionOutput(sessionID string) (string, error) {
 func appendTranscriptLine(lines *[]string, value string) {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
+		return
+	}
+	if len(*lines) > 0 && (*lines)[len(*lines)-1] == trimmed {
 		return
 	}
 	*lines = append(*lines, trimmed)
