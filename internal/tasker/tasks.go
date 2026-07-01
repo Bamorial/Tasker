@@ -115,7 +115,49 @@ func DeleteTask(root, id string, recursive bool) error {
 		return fmt.Errorf("task %s has child tasks; rerun with --recursive", id)
 	}
 
-	return os.RemoveAll(task.Path)
+	clearCurrent, err := shouldClearCurrentWorkspace(root, task)
+	if err != nil {
+		return err
+	}
+
+	if err := os.RemoveAll(task.Path); err != nil {
+		return err
+	}
+	if clearCurrent {
+		return ClearCurrentWorkspace(root)
+	}
+	return nil
+}
+
+func shouldClearCurrentWorkspace(root string, deleted *Task) (bool, error) {
+	context, err := CurrentContext(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	currentID := strings.TrimSpace(stringValue(context["current_task_id"]))
+	if currentID == "" {
+		currentID = strings.TrimSpace(stringValue(context["task_id"]))
+	}
+	if currentID == "" {
+		return false, nil
+	}
+	if currentID == deleted.Meta.ID {
+		return true, nil
+	}
+
+	currentPath, err := findTaskPathByID(root, currentID)
+	if err != nil {
+		return false, err
+	}
+	if currentPath == "" {
+		return false, nil
+	}
+
+	return pathContains(deleted.Path, currentPath), nil
 }
 
 func CreateTask(root string, input CreateTaskInput) (*CreatedTask, error) {

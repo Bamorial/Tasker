@@ -203,7 +203,7 @@ func TestCreateTaskUsesFeatureTemplateWhenTypeOmitted(t *testing.T) {
 	content := string(data)
 	for _, want := range []string{
 		"# Feature",
-		"ID: "+created.ID,
+		"ID: " + created.ID,
 		"Type: feature",
 		"## Goal",
 		"## Details",
@@ -493,7 +493,7 @@ func TestDoTaskStoresHeadlessCodexSession(t *testing.T) {
 	}
 }
 
-func TestDoTaskShowsProgressAndSuppressesStdinNotice(t *testing.T) {
+func TestDoTaskSuppressesStdinNoticeWithoutLoader(t *testing.T) {
 	root := t.TempDir()
 	if err := InitializeWorkspace(root); err != nil {
 		t.Fatalf("InitializeWorkspace: %v", err)
@@ -517,13 +517,8 @@ func TestDoTaskShowsProgressAndSuppressesStdinNotice(t *testing.T) {
 		cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS_STDERR_NOTICE=1")
 		return cmd
 	}
-	originalTicker := taskerDoProgressTicker
-	taskerDoProgressTicker = func(d time.Duration) *time.Ticker {
-		return time.NewTicker(5 * time.Millisecond)
-	}
 	t.Cleanup(func() {
 		execCommand = originalExecCommand
-		taskerDoProgressTicker = originalTicker
 	})
 
 	var stdout strings.Builder
@@ -532,14 +527,17 @@ func TestDoTaskShowsProgressAndSuppressesStdinNotice(t *testing.T) {
 		t.Fatalf("DoTask: %v", err)
 	}
 
-	if !strings.Contains(stdout.String(), "Tasker do is working.") {
-		t.Fatalf("expected progress output, got %q", stdout.String())
+	if strings.Contains(stdout.String(), "Tasker do is working.") {
+		t.Fatalf("expected loader output to be removed, got %q", stdout.String())
 	}
 	if strings.Contains(stderr.String(), "Reading additional input from stdin") {
 		t.Fatalf("expected stdin notice to be suppressed, got %q", stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "Started Codex session: session-headless-789") {
 		t.Fatalf("expected stored session output, got %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Finished with loader") {
+		t.Fatalf("expected codex output to still be shown, got %q", stdout.String())
 	}
 }
 
@@ -573,6 +571,21 @@ func TestHelperProcessHeadlessCodexWithoutSessionMeta(t *testing.T) {
 
 	fmt.Fprintln(os.Stdout, `{"type":"event_msg","payload":{"type":"agent_message","message":"Working headlessly"}}`)
 	fmt.Fprintln(os.Stdout, `{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Finished task"}]}}`)
+	os.Exit(0)
+}
+
+func TestHelperProcessDetachedDoLaunch(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS_DETACHED_DO") != "1" {
+		return
+	}
+
+	markerPath := os.Getenv("TASKER_DETACHED_MARKER")
+	if markerPath == "" {
+		os.Exit(2)
+	}
+	if err := os.WriteFile(markerPath, []byte(strings.Join(os.Args, "\n")), 0o644); err != nil {
+		os.Exit(3)
+	}
 	os.Exit(0)
 }
 
@@ -639,6 +652,52 @@ func TestDoTaskFallsBackToPersistedCodexExecSession(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Started Codex session: "+sessionID) {
 		t.Fatalf("expected command output to include fallback session id, got %q", stdout.String())
 	}
+}
+
+func TestStartDetachedDoTaskLaunchesCurrentExecutable(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	created, err := CreateTask(root, CreateTaskInput{Title: "Detached", Type: "feature"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	originalExecutablePath := currentExecutablePath
+	originalDetachedExecCommand := detachedExecCommand
+	currentExecutablePath = func() (string, error) {
+		return os.Args[0], nil
+	}
+	detachedExecCommand = func(name string, args ...string) *exec.Cmd {
+		helperArgs := append([]string{"-test.run=TestHelperProcessDetachedDoLaunch", "--", name}, args...)
+		cmd := exec.Command(os.Args[0], helperArgs...)
+		cmd.Env = append(os.Environ(),
+			"GO_WANT_HELPER_PROCESS_DETACHED_DO=1",
+			"TASKER_DETACHED_MARKER="+filepath.Join(root, "detached.marker"),
+		)
+		return cmd
+	}
+	t.Cleanup(func() {
+		currentExecutablePath = originalExecutablePath
+		detachedExecCommand = originalDetachedExecCommand
+	})
+
+	if err := StartDetachedDoTask(root, created.ID); err != nil {
+		t.Fatalf("StartDetachedDoTask: %v", err)
+	}
+
+	markerPath := filepath.Join(root, "detached.marker")
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(markerPath); err == nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	t.Fatalf("expected detached helper to write %s", markerPath)
 }
 
 func TestSessionsForActionFiltersByAvailableCommand(t *testing.T) {
@@ -1038,6 +1097,46 @@ func TestDeleteLeafTask(t *testing.T) {
 	}
 }
 
+func TestDeleteCurrentTaskClearsCurrentWorkspace(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	created, err := CreateTask(root, CreateTaskInput{Title: "Leaf", Type: "feature"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	task, err := GetTask(root, created.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if err := WriteCurrentWorkspace(root, task, CurrentWorkspaceInput{}); err != nil {
+		t.Fatalf("WriteCurrentWorkspace: %v", err)
+	}
+
+	if err := DeleteTask(root, created.ID, false); err != nil {
+		t.Fatalf("DeleteTask: %v", err)
+	}
+
+	context, err := CurrentContext(root)
+	if err != nil {
+		t.Fatalf("CurrentContext: %v", err)
+	}
+	if len(context) != 0 {
+		t.Fatalf("expected current context to be cleared, got %#v", context)
+	}
+
+	workspacePath := filepath.Join(root, TaskerDirName, "current", "WORKSPACE.md")
+	data, err := os.ReadFile(workspacePath)
+	if err != nil {
+		t.Fatalf("ReadFile workspace: %v", err)
+	}
+	if string(data) != workspaceTemplate() {
+		t.Fatalf("expected workspace to reset, got:\n%s", string(data))
+	}
+}
+
 func TestTaskStatusesIncludesAllTasks(t *testing.T) {
 	root := t.TempDir()
 	if err := InitializeWorkspace(root); err != nil {
@@ -1425,6 +1524,47 @@ func TestDeleteParentRecursive(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("expected tasks root to be empty, got %d entries", len(entries))
+	}
+}
+
+func TestDeleteParentRecursiveClearsCurrentChildWorkspace(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	parent, err := CreateTask(root, CreateTaskInput{Title: "Parent", Type: "feature"})
+	if err != nil {
+		t.Fatalf("CreateTask parent: %v", err)
+	}
+
+	child, err := CreateTask(root, CreateTaskInput{
+		Title:    "Child",
+		Type:     "feature",
+		ParentID: parent.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateTask child: %v", err)
+	}
+
+	childTask, err := GetTask(root, child.ID)
+	if err != nil {
+		t.Fatalf("GetTask child: %v", err)
+	}
+	if err := WriteCurrentWorkspace(root, childTask, CurrentWorkspaceInput{}); err != nil {
+		t.Fatalf("WriteCurrentWorkspace: %v", err)
+	}
+
+	if err := DeleteTask(root, parent.ID, true); err != nil {
+		t.Fatalf("DeleteTask recursive: %v", err)
+	}
+
+	context, err := CurrentContext(root)
+	if err != nil {
+		t.Fatalf("CurrentContext: %v", err)
+	}
+	if len(context) != 0 {
+		t.Fatalf("expected current context to be cleared, got %#v", context)
 	}
 }
 

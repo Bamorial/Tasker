@@ -3,18 +3,19 @@ package tasker
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
 var execCommand = exec.Command
-var taskerDoProgressTicker = time.NewTicker
+var currentExecutablePath = os.Executable
+var detachedExecCommand = exec.Command
 
 type codexExecEvent struct {
 	Type    string          `json:"type"`
@@ -81,19 +82,14 @@ func DoTask(root, id string, out, errOut io.Writer) error {
 		return err
 	}
 
-	progress := newTaskerDoProgress(out)
-	progress.start()
-	defer progress.stop()
-
 	stderrDone := make(chan error, 1)
 	go func() {
-		stderrDone <- relayCodexExecStderr(stderr, progress, errOut)
+		stderrDone <- relayCodexExecStderr(stderr, errOut)
 	}()
 
 	decoder := json.NewDecoder(bufio.NewReader(stdout))
 	sessionStored := false
 	storeSession := func(sessionID, source string) error {
-		progress.stop()
 		if err := StoreTaskSession(task, newCodexTaskSession(sessionID, source, time.Now())); err != nil {
 			return err
 		}
@@ -108,7 +104,6 @@ func DoTask(root, id string, out, errOut io.Writer) error {
 			if err == io.EOF {
 				break
 			}
-			progress.stop()
 			_ = cmd.Wait()
 			<-stderrDone
 			return err
@@ -123,15 +118,13 @@ func DoTask(root, id string, out, errOut io.Writer) error {
 			}
 		}
 
-		renderCodexExecEvent(out, progress, event)
+		renderCodexExecEvent(out, event)
 	}
 
 	if err := cmd.Wait(); err != nil {
-		progress.stop()
 		<-stderrDone
 		return err
 	}
-	progress.stop()
 	if err := <-stderrDone; err != nil {
 		return err
 	}
@@ -150,6 +143,37 @@ func DoTask(root, id string, out, errOut io.Writer) error {
 	}
 
 	return finalizeDoTaskStatus(root, task.Meta.ID, startedAt)
+}
+
+func StartDetachedDoTask(root, id string) error {
+	if _, err := GetTask(root, id); err != nil {
+		return err
+	}
+
+	executablePath, err := currentExecutablePath()
+	if err != nil {
+		return err
+	}
+
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	defer devNull.Close()
+
+	cmd := detachedExecCommand(executablePath, "do", id)
+	cmd.Dir = root
+	cmd.Stdin = devNull
+	cmd.Stdout = devNull
+	cmd.Stderr = devNull
+
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	if cmd.Process != nil {
+		return cmd.Process.Release()
+	}
+	return nil
 }
 
 func buildTaskerDoPrompt(task *Task) string {
@@ -198,7 +222,7 @@ func sessionIDFromEvent(event codexExecEvent) (string, bool) {
 	return "", false
 }
 
-func renderCodexExecEvent(out io.Writer, progress *taskerDoProgress, event codexExecEvent) {
+func renderCodexExecEvent(out io.Writer, event codexExecEvent) {
 	switch event.Type {
 	case "event_msg":
 		var payload codexEventMessagePayload
@@ -206,7 +230,6 @@ func renderCodexExecEvent(out io.Writer, progress *taskerDoProgress, event codex
 			return
 		}
 		if payload.Type == "agent_message" && strings.TrimSpace(payload.Message) != "" {
-			progress.stop()
 			fmt.Fprintln(out, payload.Message)
 		}
 	case "response_item":
@@ -219,79 +242,29 @@ func renderCodexExecEvent(out io.Writer, progress *taskerDoProgress, event codex
 		}
 		for _, content := range payload.Content {
 			if content.Type == "output_text" && strings.TrimSpace(content.Text) != "" {
-				progress.stop()
 				fmt.Fprintln(out, content.Text)
 			}
 		}
 	}
 }
 
-func relayCodexExecStderr(stderr io.Reader, progress *taskerDoProgress, errOut io.Writer) error {
+func relayCodexExecStderr(stderr io.Reader, errOut io.Writer) error {
 	scanner := bufio.NewScanner(stderr)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if shouldSuppressCodexExecStderr(line) {
 			continue
 		}
-		progress.stop()
 		fmt.Fprintln(errOut, line)
 	}
-	return scanner.Err()
+	err := scanner.Err()
+	if errors.Is(err, os.ErrClosed) {
+		return nil
+	}
+	return err
 }
 
 func shouldSuppressCodexExecStderr(line string) bool {
 	normalized := strings.TrimSpace(strings.ToLower(line))
 	return strings.Contains(normalized, "reading additional input from stdin")
-}
-
-type taskerDoProgress struct {
-	out      io.Writer
-	done     chan struct{}
-	finished chan struct{}
-	stopOnce sync.Once
-}
-
-func newTaskerDoProgress(out io.Writer) *taskerDoProgress {
-	return &taskerDoProgress{
-		out:      out,
-		done:     make(chan struct{}),
-		finished: make(chan struct{}),
-	}
-}
-
-func (p *taskerDoProgress) start() {
-	go func() {
-		defer close(p.finished)
-
-		frames := []string{
-			"Tasker do is working.",
-			"Tasker do is working..",
-			"Tasker do is working...",
-			"Tasker do is working....",
-		}
-		ticker := taskerDoProgressTicker(250 * time.Millisecond)
-		defer ticker.Stop()
-
-		i := 0
-		fmt.Fprintf(p.out, "\r%s", frames[i])
-		i++
-
-		for {
-			select {
-			case <-p.done:
-				fmt.Fprint(p.out, "\r\033[K")
-				return
-			case <-ticker.C:
-				fmt.Fprintf(p.out, "\r%s", frames[i%len(frames)])
-				i++
-			}
-		}
-	}()
-}
-
-func (p *taskerDoProgress) stop() {
-	p.stopOnce.Do(func() {
-		close(p.done)
-		<-p.finished
-	})
 }

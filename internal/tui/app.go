@@ -1,14 +1,12 @@
 package tui
 
 import (
-	"bytes"
 	"fmt"
-	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/bamorial/tasker/internal/buildinfo"
@@ -17,15 +15,25 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 )
 
-type tab int
+type panelFocus int
 
 const (
-	tabDashboard tab = iota
-	tabTasks
-	tabCurrent
-	tabJobs
+	panelCurrent panelFocus = iota
+	panelTasks
+	panelWorkers
+)
+
+type currentViewMode string
+
+const (
+	viewAuto   currentViewMode = "auto"
+	viewTask   currentViewMode = "task"
+	viewResult currentViewMode = "result"
+	viewStatus currentViewMode = "status"
+	viewAgent  currentViewMode = "agent"
 )
 
 type modalKind string
@@ -57,30 +65,25 @@ type confirmModal struct {
 	SelectedYes bool
 }
 
-type safeBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *safeBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *safeBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
-
 type jobState struct {
 	Label   string
 	TaskID  string
+	Task    tasker.Task
 	Started time.Time
-	Buffer  *safeBuffer
-	Output  string
 	Running bool
+}
+
+type visibleTaskItem struct {
+	Task       tasker.Task
+	Depth      int
+	ChildCount int
+	HasChild   bool
+	Expanded   bool
+}
+
+type workerTaskItem struct {
+	Task   tasker.Task
+	Active bool
 }
 
 type mutationResultMsg struct {
@@ -96,13 +99,7 @@ type snapshotMsg struct {
 	Err      error
 }
 
-type jobFinishedMsg struct {
-	Status string
-	TaskID string
-	Err    error
-}
-
-type jobTickMsg struct{}
+type workspaceTickMsg struct{}
 
 type externalDoneMsg struct {
 	Status     string
@@ -117,21 +114,24 @@ type model struct {
 	width  int
 	height int
 
-	tab  tab
-	help bool
+	focus           panelFocus
+	currentViewMode currentViewMode
+	help            bool
 
 	snapshot *tasker.WorkspaceSnapshot
 
-	filterInput    textinput.Model
-	filtering      bool
-	statusFilter   string
-	typeFilter     string
-	filtered       []tasker.TaskTreeItem
-	selectedTaskID string
+	filterInput          textinput.Model
+	filtering            bool
+	statusFilter         string
+	typeFilter           string
+	filtered             []visibleTaskItem
+	selectedTaskID       string
+	selectedWorkerTaskID string
+	expandedTasks        map[string]bool
 
-	detailViewport viewport.Model
-	mainViewport   viewport.Model
-	jobViewport    viewport.Model
+	taskViewport    viewport.Model
+	currentViewport viewport.Model
+	workerViewport  viewport.Model
 
 	form    *formModal
 	session *sessionModal
@@ -156,24 +156,26 @@ func newModel(root string) model {
 	filter.Placeholder = "title, id, slug"
 	filter.Width = 24
 
-	detail := viewport.New(0, 0)
-	main := viewport.New(0, 0)
-	job := viewport.New(0, 0)
+	taskVP := viewport.New(0, 0)
+	currentVP := viewport.New(0, 0)
+	workerVP := viewport.New(0, 0)
 
 	return model{
-		root:           root,
-		tab:            tabTasks,
-		filterInput:    filter,
-		statusFilter:   filterAll,
-		typeFilter:     filterAll,
-		detailViewport: detail,
-		mainViewport:   main,
-		jobViewport:    job,
+		root:            root,
+		focus:           panelTasks,
+		currentViewMode: viewAuto,
+		filterInput:     filter,
+		statusFilter:    filterAll,
+		typeFilter:      filterAll,
+		expandedTasks:   make(map[string]bool),
+		taskViewport:    taskVP,
+		currentViewport: currentVP,
+		workerViewport:  workerVP,
 	}
 }
 
 func (m model) Init() tea.Cmd {
-	return refreshCmd(m.root)
+	return tea.Batch(refreshCmd(m.root), workspaceTickCmd())
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -190,6 +192,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.snapshot = msg.Snapshot
+		m.reconcileActiveJob()
 		m.lastErr = ""
 		m.syncDerivedState()
 		if m.pendingSelection != "" {
@@ -233,26 +236,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, refreshCmd(m.root)
 		}
 		return m, nil
-	case jobFinishedMsg:
-		if m.activeJob != nil && m.activeJob.TaskID == msg.TaskID {
-			m.activeJob.Running = false
-			m.activeJob.Output = m.activeJob.Buffer.String()
-			m.jobViewport.SetContent(m.activeJob.Output)
+	case workspaceTickMsg:
+		if m.currentViewMode == viewAgent {
+			m.syncCurrentViewport()
 		}
-		if msg.Err != nil {
-			m.lastErr = msg.Err.Error()
-			return m, refreshCmd(m.root)
+		if m.hasRunningTasks() {
+			return m, tea.Batch(refreshCmd(m.root), workspaceTickCmd())
 		}
-		m.lastStatus = msg.Status
-		m.lastErr = ""
-		return m, refreshCmd(m.root)
-	case jobTickMsg:
-		if m.activeJob != nil && m.activeJob.Running {
-			m.activeJob.Output = m.activeJob.Buffer.String()
-			m.jobViewport.SetContent(m.activeJob.Output)
-			return m, pollJobCmd()
-		}
-		return m, nil
+		return m, workspaceTickCmd()
 	case tea.KeyMsg:
 		if m.form != nil {
 			return m.updateForm(msg)
@@ -270,24 +261,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	var cmd tea.Cmd
-	switch m.tab {
-	case tabTasks:
-		m.detailViewport, cmd = m.detailViewport.Update(msg)
-		return m, cmd
-	case tabCurrent, tabDashboard:
-		m.mainViewport, cmd = m.mainViewport.Update(msg)
-		return m, cmd
-	case tabJobs:
-		m.jobViewport, cmd = m.jobViewport.Update(msg)
-		return m, cmd
-	default:
-		return m, nil
+	switch m.focus {
+	case panelTasks:
+		m.taskViewport, cmd = m.taskViewport.Update(msg)
+	case panelCurrent:
+		m.currentViewport, cmd = m.currentViewport.Update(msg)
+	case panelWorkers:
+		m.workerViewport, cmd = m.workerViewport.Update(msg)
 	}
+	return m, cmd
 }
 
 func (m model) View() string {
 	if m.width == 0 || m.height == 0 {
-		return "Loading Tasker TUI..."
+		return ""
 	}
 
 	header := m.renderHeader()
@@ -314,18 +301,19 @@ func (m *model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "q":
 		return m, tea.Quit
-	case "tab":
-		m.tab = (m.tab + 1) % 4
-		m.syncDerivedState()
+	case "0":
+		m.focus = panelCurrent
 		return m, nil
-	case "shift+tab":
-		m.tab = (m.tab - 1 + 4) % 4
-		m.syncDerivedState()
+	case "1":
+		m.focus = panelTasks
+		return m, nil
+	case "2":
+		m.focus = panelWorkers
 		return m, nil
 	case "?":
 		m.help = !m.help
 		return m, nil
-	case "r":
+	case "R":
 		return m, refreshCmd(m.root)
 	case "/":
 		m.filtering = true
@@ -341,13 +329,13 @@ func (m *model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	switch m.tab {
-	case tabTasks:
+	switch m.focus {
+	case panelTasks:
 		return m.updateTasksViewKeys(msg)
-	case tabDashboard, tabCurrent:
-		return m.updateViewportKeys(msg, &m.mainViewport)
-	case tabJobs:
-		return m.updateViewportKeys(msg, &m.jobViewport)
+	case panelCurrent:
+		return m.updateCurrentViewKeys(msg)
+	case panelWorkers:
+		return m.updateWorkersViewKeys(msg)
 	default:
 		return m, nil
 	}
@@ -417,11 +405,76 @@ func (m *model) updateTasksViewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "f":
 		return m.openSessionPicker(tasker.AgentSessionFork)
 	case "enter":
-		m.tab = tabCurrent
+		m.toggleSelectedTaskExpansion()
+		m.focus = panelCurrent
 		m.syncDerivedState()
 		return m, nil
 	default:
-		return m.updateViewportKeys(msg, &m.detailViewport)
+		return m.updateViewportKeys(msg, &m.taskViewport)
+	}
+}
+
+func (m *model) updateCurrentViewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "t":
+		m.currentViewMode = viewTask
+		m.syncCurrentViewport()
+		return m, nil
+	case "r":
+		m.currentViewMode = viewResult
+		m.syncCurrentViewport()
+		return m, nil
+	case "s":
+		m.currentViewMode = viewStatus
+		m.syncCurrentViewport()
+		return m, nil
+	case "w":
+		m.currentViewMode = viewAgent
+		m.syncCurrentViewport()
+		return m, nil
+	case "e":
+		return m.openSelectedTaskInEditor()
+	case "x":
+		task := m.selectedTask()
+		if task == nil {
+			return m.withError("select a task first"), nil
+		}
+		return m.startDoJob(*task)
+	case "S":
+		return m.openSessionPicker(tasker.AgentSessionResume)
+	case "F":
+		return m.openSessionPicker(tasker.AgentSessionFork)
+	default:
+		return m.updateViewportKeys(msg, &m.currentViewport)
+	}
+}
+
+func (m *model) updateWorkersViewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "up", "k":
+		m.moveWorkerSelection(-1)
+		return m, nil
+	case "down", "j":
+		m.moveWorkerSelection(1)
+		return m, nil
+	case "pgup":
+		m.moveWorkerSelection(-5)
+		return m, nil
+	case "pgdown":
+		m.moveWorkerSelection(5)
+		return m, nil
+	case "enter":
+		task := m.selectedWorkerTask()
+		if task == nil {
+			return m.withError("no running task selected"), nil
+		}
+		m.selectedTaskID = task.Meta.ID
+		m.currentViewMode = viewAgent
+		m.focus = panelCurrent
+		m.syncDerivedState()
+		return m, nil
+	default:
+		return m.updateViewportKeys(msg, &m.workerViewport)
 	}
 }
 
@@ -912,30 +965,19 @@ func (m *model) openSessionPicker(action tasker.AgentSessionAction) (tea.Model, 
 }
 
 func (m *model) startDoJob(task tasker.Task) (tea.Model, tea.Cmd) {
-	if m.activeJob != nil && m.activeJob.Running {
-		return m.withError("wait for the current `do` job to finish"), nil
-	}
-
-	buffer := &safeBuffer{}
 	m.activeJob = &jobState{
 		Label:   "tasker do " + task.Meta.ID,
 		TaskID:  task.Meta.ID,
+		Task:    task,
 		Started: time.Now(),
-		Buffer:  buffer,
 		Running: true,
 	}
-	m.tab = tabJobs
-	m.jobViewport.SetContent("")
-
-	cmd := func() tea.Msg {
-		err := tasker.DoTask(m.root, task.Meta.ID, io.MultiWriter(buffer), io.MultiWriter(buffer))
-		return jobFinishedMsg{
-			Status: "Finished tasker do for " + task.Meta.ID,
-			TaskID: task.Meta.ID,
-			Err:    err,
-		}
-	}
-	return m, tea.Batch(cmd, pollJobCmd())
+	m.selectedWorkerTaskID = task.Meta.ID
+	m.focus = panelWorkers
+	m.syncWorkerViewport()
+	return m, mutationCmd("Started tasker do for "+task.Meta.ID, task.Meta.ID, true, func() (*exec.Cmd, error) {
+		return nil, tasker.StartDetachedDoTask(m.root, task.Meta.ID)
+	})
 }
 
 func (m *model) selectedTask() *tasker.Task {
@@ -981,29 +1023,7 @@ func (m *model) applyFilters() {
 	}
 
 	query := strings.ToLower(strings.TrimSpace(m.filterInput.Value()))
-	filtered := make([]tasker.TaskTreeItem, 0, len(m.snapshot.Tree))
-	for _, item := range m.snapshot.Tree {
-		if m.statusFilter != filterAll && item.Task.Status.Status != m.statusFilter {
-			continue
-		}
-		if m.typeFilter != filterAll && item.Task.Meta.Type != m.typeFilter {
-			continue
-		}
-		if query != "" {
-			haystack := strings.ToLower(strings.Join([]string{
-				item.Task.Meta.ID,
-				item.Task.Meta.Title,
-				item.Task.Meta.Slug,
-				item.Task.Status.Status,
-				item.Task.Meta.Type,
-			}, " "))
-			if !strings.Contains(haystack, query) {
-				continue
-			}
-		}
-		filtered = append(filtered, item)
-	}
-	m.filtered = filtered
+	m.filtered = m.buildVisibleTasks(query)
 	m.ensureSelection()
 }
 
@@ -1012,6 +1032,15 @@ func (m *model) ensureSelection() {
 		m.selectedTaskID = ""
 		return
 	}
+	if m.selectedTaskID != "" {
+		m.expandTaskPath(m.selectedTaskID)
+		for _, item := range m.filtered {
+			if item.Task.Meta.ID == m.selectedTaskID {
+				return
+			}
+		}
+		m.filtered = m.buildVisibleTasks(strings.ToLower(strings.TrimSpace(m.filterInput.Value())))
+	}
 	for _, item := range m.filtered {
 		if item.Task.Meta.ID == m.selectedTaskID {
 			return
@@ -1019,6 +1048,7 @@ func (m *model) ensureSelection() {
 	}
 
 	if m.snapshot != nil && m.snapshot.Current.Task != nil {
+		m.expandTaskPath(m.snapshot.Current.Task.Meta.ID)
 		for _, item := range m.filtered {
 			if item.Task.Meta.ID == m.snapshot.Current.Task.Meta.ID {
 				m.selectedTaskID = item.Task.Meta.ID
@@ -1032,100 +1062,61 @@ func (m *model) ensureSelection() {
 
 func (m *model) syncDerivedState() {
 	m.applyFilters()
+	m.ensureWorkerSelection()
 	m.resizeViewports()
-	m.syncDetailViewport()
-	m.syncMainViewport()
-	if m.activeJob != nil {
-		m.activeJob.Output = m.activeJob.Buffer.String()
-		m.jobViewport.SetContent(m.activeJob.Output)
-	}
+	m.syncTaskViewport()
+	m.syncCurrentViewport()
+	m.syncWorkerViewport()
 }
 
 func (m *model) resizeViewports() {
-	bodyHeight := maxInt(8, m.height-6)
-	leftWidth := maxInt(24, m.width/2-2)
-	rightWidth := maxInt(30, m.width-leftWidth-5)
-
-	m.detailViewport.Width = rightWidth
-	m.detailViewport.Height = bodyHeight - 5
-	m.mainViewport.Width = maxInt(40, m.width-4)
-	m.mainViewport.Height = bodyHeight
-	m.jobViewport.Width = maxInt(40, m.width-4)
-	m.jobViewport.Height = bodyHeight
-}
-
-func (m *model) syncDetailViewport() {
-	task := m.selectedTask()
-	if task == nil {
-		m.detailViewport.SetContent("No task selected.")
-		return
+	bodyHeight := maxInt(12, m.height-6)
+	leftWidth := maxInt(30, m.width/3)
+	rightWidth := maxInt(40, m.width-leftWidth-3)
+	taskPanelHeight := maxInt(10, (bodyHeight*2)/3)
+	workerPanelHeight := maxInt(8, bodyHeight-taskPanelHeight)
+	if taskPanelHeight+workerPanelHeight > bodyHeight {
+		taskPanelHeight = bodyHeight - workerPanelHeight
 	}
 
-	lines, err := tasker.TaskStatusDetailsStyled(m.root, task.Meta.ID, tasker.StatusFormatOptions{})
-	if err != nil {
-		m.detailViewport.SetContent("Error loading task detail: " + err.Error())
-		return
-	}
-	m.detailViewport.SetContent(strings.Join(lines, "\n"))
-}
-
-func (m *model) syncMainViewport() {
-	switch m.tab {
-	case tabDashboard:
-		m.mainViewport.SetContent(m.dashboardContent())
-	case tabCurrent:
-		m.mainViewport.SetContent(m.currentContent())
-	case tabJobs:
-		if m.activeJob != nil {
-			m.jobViewport.SetContent(m.activeJob.Buffer.String())
-		}
-	}
+	m.taskViewport.Width = maxInt(12, leftWidth-4)
+	m.taskViewport.Height = maxInt(3, taskPanelHeight-4)
+	m.currentViewport.Width = maxInt(16, rightWidth-4)
+	m.currentViewport.Height = maxInt(3, bodyHeight-4)
+	m.workerViewport.Width = maxInt(12, leftWidth-4)
+	m.workerViewport.Height = maxInt(3, workerPanelHeight-4)
 }
 
 func (m model) renderHeader() string {
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
-	tabStyle := lipgloss.NewStyle().Padding(0, 1)
-	activeTab := tabStyle.Copy().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62"))
-
-	tabs := []string{"Dashboard", "Tasks", "Current", "Jobs"}
-	rendered := make([]string, 0, len(tabs))
-	for i, label := range tabs {
-		if i == int(m.tab) {
-			rendered = append(rendered, activeTab.Render(label))
-		} else {
-			rendered = append(rendered, tabStyle.Render(label))
-		}
-	}
-
+	metaStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	meta := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render(
 		fmt.Sprintf("%s  version %s", m.root, buildinfo.Version),
 	)
+	focus := metaStyle.Render("focus 0=current 1=tasks 2=workers")
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
 		titleStyle.Render("Tasker TUI"),
-		lipgloss.JoinHorizontal(lipgloss.Top, strings.Join(rendered, " "), "  ", meta),
+		lipgloss.JoinHorizontal(lipgloss.Top, focus, "  ", meta),
 	)
 }
 
 func (m model) renderBody() string {
-	switch m.tab {
-	case tabDashboard:
-		return m.panel("Dashboard", m.mainViewport.View())
-	case tabCurrent:
-		return m.panel("Current Workspace", m.mainViewport.View())
-	case tabJobs:
-		return m.panel("Jobs", m.jobsContent())
-	default:
-		return m.renderTasksBody()
+	bodyHeight := maxInt(12, m.height-6)
+	leftWidth := maxInt(30, m.width/3)
+	rightWidth := maxInt(40, m.width-leftWidth-3)
+	taskPanelHeight := maxInt(10, (bodyHeight*2)/3)
+	workerPanelHeight := maxInt(8, bodyHeight-taskPanelHeight)
+	if taskPanelHeight+workerPanelHeight > bodyHeight {
+		taskPanelHeight = bodyHeight - workerPanelHeight
 	}
-}
 
-func (m model) renderTasksBody() string {
-	leftWidth := maxInt(24, m.width/2-2)
-	rightWidth := maxInt(30, m.width-leftWidth-5)
-
-	left := m.panelWithWidth("Tasks", leftWidth, m.tasksListContent())
-	right := m.panelWithWidth("Task Detail", rightWidth, m.detailViewport.View())
+	left := lipgloss.JoinVertical(
+		lipgloss.Left,
+		m.panelWithDimensions("1 Tasks", leftWidth, taskPanelHeight, m.focus == panelTasks, m.taskViewport.View()),
+		m.panelWithDimensions("2 Workers", leftWidth, workerPanelHeight, m.focus == panelWorkers, m.workerViewport.View()),
+	)
+	right := m.panelWithDimensions("0 Current View", rightWidth, bodyHeight, m.focus == panelCurrent, m.currentViewport.View())
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, " ", right)
 }
 
@@ -1139,11 +1130,14 @@ func (m model) renderFooter() string {
 	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 
 	footer := []string{
-		keyStyle.Render("tab shift+tab switch views"),
+		keyStyle.Render("0/1/2 focus panels"),
 		keyStyle.Render("/ filter"),
-		keyStyle.Render("S status"),
+		keyStyle.Render("S status filter"),
 		keyStyle.Render("T type"),
-		keyStyle.Render("n/a/m/c/u/I/d/e/x/s/f actions"),
+		keyStyle.Render("enter open task/output"),
+		keyStyle.Render("t/r/s/w switch current view"),
+		keyStyle.Render("e edit  x do  S resume  F fork"),
+		keyStyle.Render("R refresh"),
 		keyStyle.Render("? help"),
 		keyStyle.Render("q quit"),
 	}
@@ -1156,27 +1150,43 @@ func (m model) renderFooter() string {
 }
 
 func (m model) panel(title, body string) string {
-	return m.panelWithWidth(title, maxInt(40, m.width-2), body)
+	return m.panelWithDimensions(title, maxInt(40, m.width-2), maxInt(6, m.height-5), false, body)
 }
 
-func (m model) panelWithWidth(title string, width int, body string) string {
+func (m model) panelWithDimensions(title string, width, height int, focused bool, body string) string {
+	border := lipgloss.Color("240")
+	if focused {
+		border = lipgloss.Color("62")
+	}
 	style := lipgloss.NewStyle().
 		Width(width).
-		Height(maxInt(6, m.height-5)).
-		Padding(1).
+		Height(height).
+		Padding(0, 1).
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("240"))
-	return style.Render(lipgloss.NewStyle().Bold(true).Render(title) + "\n\n" + body)
+		BorderForeground(border)
+	titleStyle := lipgloss.NewStyle().Bold(true)
+	return style.Render(titleStyle.Render(title) + "\n" + body)
+}
+
+func (m *model) syncTaskViewport() {
+	m.taskViewport.SetContent(m.tasksListContent())
+	selectedLine := 2
+	for i, item := range m.filtered {
+		if item.Task.Meta.ID == m.selectedTaskID {
+			selectedLine += i
+			break
+		}
+	}
+	ensureViewportContains(&m.taskViewport, selectedLine)
 }
 
 func (m model) tasksListContent() string {
 	lines := []string{
 		fmt.Sprintf("Filter: %s", m.filterInput.View()),
 		fmt.Sprintf("Status: %s  Type: %s", m.statusFilter, m.typeFilter),
-		"",
 	}
 	if len(m.filtered) == 0 {
-		lines = append(lines, "No matching tasks.")
+		lines = append(lines, "", "No matching tasks.")
 		return strings.Join(lines, "\n")
 	}
 	for _, item := range m.filtered {
@@ -1184,147 +1194,431 @@ func (m model) tasksListContent() string {
 		if item.Task.Meta.ID == m.selectedTaskID {
 			prefix = "> "
 		}
+		currentMarker := " "
+		if m.snapshot != nil && m.snapshot.Current.Task != nil && m.snapshot.Current.Task.Meta.ID == item.Task.Meta.ID {
+			currentMarker = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42")).Render("*")
+		}
 		indent := strings.Repeat("  ", item.Depth)
-		lines = append(lines, fmt.Sprintf(
-			"%s%s%s [%s] (%s)",
+		marker := "•"
+		if item.HasChild {
+			if item.Expanded {
+				marker = "▾"
+			} else {
+				marker = "▸"
+			}
+		}
+		line := fmt.Sprintf("%s%s%s %s %s %s %s",
 			prefix,
+			currentMarker,
 			indent,
-			tasker.TaskSummary(item.Task),
-			item.Task.Meta.Type,
-			item.Task.Status.Status,
-		))
+			marker,
+			item.Task.Meta.ID,
+			renderTaskStatusBadge(item.Task.Status.Status),
+			item.Task.Meta.Title,
+		)
+		lines = append(lines, truncateTaskListLine(line, m.taskViewport.Width))
 	}
 	return strings.Join(lines, "\n")
 }
 
-func (m model) dashboardContent() string {
-	if m.snapshot == nil {
-		return "Loading workspace snapshot..."
-	}
-
-	lines := []string{
-		"Current task:",
-	}
-	if m.snapshot.Current.Task == nil {
-		lines = append(lines, "- none")
-	} else {
-		lines = append(lines,
-			fmt.Sprintf("- %s", tasker.TaskSummary(*m.snapshot.Current.Task)),
-			fmt.Sprintf("- status: %s", m.snapshot.Current.Task.Status.Status),
-			fmt.Sprintf("- type: %s", m.snapshot.Current.Task.Meta.Type),
-		)
-		if m.snapshot.Current.Branch != "" {
-			lines = append(lines, fmt.Sprintf("- branch: %s", m.snapshot.Current.Branch))
-		}
-	}
-
-	lines = append(lines, "", "Status counts:")
-	statuses := tasker.ValidTaskStatuses()
-	slices.Sort(statuses)
-	for _, status := range statuses {
-		lines = append(lines, fmt.Sprintf("- %s: %d", status, m.snapshot.StatusCounts[status]))
-	}
-
-	lines = append(lines, "", "Actionable queue:")
-	actionable := []string{"NEW", "RUNNING", "BLOCKED", "HANDOFF", "REVIEW", "AWAITING_ACTION"}
-	found := 0
-	for _, item := range m.snapshot.Tree {
-		if !slices.Contains(actionable, item.Task.Status.Status) {
-			continue
-		}
-		lines = append(lines, fmt.Sprintf("- %s [%s] (%s)", tasker.TaskSummary(item.Task), item.Task.Status.Status, item.Task.Meta.Type))
-		found++
-		if found >= 12 {
-			break
-		}
-	}
-	if found == 0 {
-		lines = append(lines, "- none")
-	}
-	return strings.Join(lines, "\n")
+func (m *model) syncCurrentViewport() {
+	m.currentViewport.SetContent(m.currentContent())
+	m.currentViewport.GotoTop()
 }
 
 func (m model) currentContent() string {
-	if m.snapshot == nil {
-		return "Loading workspace snapshot..."
-	}
-	if m.snapshot.Current.Task == nil {
-		return "No current task is checked out."
+	task := m.selectedTask()
+	if task == nil {
+		return "No task selected."
 	}
 
-	task := m.snapshot.Current.Task
-	lines := []string{
-		fmt.Sprintf("Current: %s", tasker.TaskSummary(*task)),
-		fmt.Sprintf("Path: %s", task.Path),
-		fmt.Sprintf("Status: %s", task.Status.Status),
-	}
-	if m.snapshot.Current.Branch != "" {
-		lines = append(lines, fmt.Sprintf("Git branch: %s", m.snapshot.Current.Branch))
-	}
-
-	lines = append(lines, "", "Parent chain:")
-	if len(m.snapshot.Current.ParentChain) == 0 {
-		lines = append(lines, "- none")
-	} else {
-		for _, parent := range m.snapshot.Current.ParentChain {
-			lines = append(lines, fmt.Sprintf("- %s", tasker.TaskSummary(parent)))
+	mode := m.currentViewMode
+	if mode == viewAuto {
+		if content, err := readTaskFile(task.ResultFile); err == nil && strings.TrimSpace(content) != "# Result\n\nSummary:" {
+			return m.decorateCurrentContent(*task, "result.md", content)
 		}
+		mode = viewTask
 	}
 
-	lines = append(lines, "", "Workspace files:")
-	for _, path := range []string{
-		filepath.Join(m.root, ".tasker", "current", "WORKSPACE.md"),
-		filepath.Join(m.root, ".tasker", "current", "FILES.md"),
-		filepath.Join(m.root, ".tasker", "current", "CONTEXT.json"),
-	} {
-		lines = append(lines, "- "+path)
+	switch mode {
+	case viewResult:
+		content, err := readTaskFile(task.ResultFile)
+		if err != nil {
+			return "Error loading result.md: " + err.Error()
+		}
+		return m.decorateCurrentContent(*task, "result.md", content)
+	case viewStatus:
+		lines, err := tasker.TaskStatusDetailsStyled(m.root, task.Meta.ID, tasker.StatusFormatOptions{})
+		if err != nil {
+			return "Error loading status: " + err.Error()
+		}
+		return m.decorateCurrentContent(*task, "status", strings.Join(lines, "\n"))
+	case viewAgent:
+		return m.decorateCurrentContent(*task, "agent output", m.agentOutputContent(*task))
+	default:
+		content, err := readTaskFile(task.TaskFile)
+		if err != nil {
+			return "Error loading task.md: " + err.Error()
+		}
+		return m.decorateCurrentContent(*task, "task.md", content)
 	}
+}
 
-	lines = append(lines, "", "Task files:")
-	for _, path := range []string{
-		task.TaskFile,
-		task.InstructionsFile,
-		task.DeclarationFile,
-		task.ResultFile,
-		task.MetaFile,
-	} {
-		lines = append(lines, "- "+path)
+func (m model) decorateCurrentContent(task tasker.Task, label, content string) string {
+	lines := []string{
+		fmt.Sprintf("Task: %s", tasker.TaskSummary(task)),
+		fmt.Sprintf("View: %s", label),
+		fmt.Sprintf("Status: %s", task.Status.Status),
+		fmt.Sprintf("Type: %s", task.Meta.Type),
+		"",
+		content,
 	}
 	return strings.Join(lines, "\n")
 }
 
-func (m model) jobsContent() string {
-	if m.activeJob == nil {
-		return "No job has been started yet."
+func (m *model) syncWorkerViewport() {
+	m.workerViewport.SetContent(m.workerContent())
+	selectedLine := 1
+	for i, item := range m.workerTasks() {
+		if item.Task.Meta.ID == m.selectedWorkerTaskID {
+			selectedLine += i
+			break
+		}
 	}
-	header := []string{
-		fmt.Sprintf("Job: %s", m.activeJob.Label),
-		fmt.Sprintf("Started: %s", m.activeJob.Started.Format(time.RFC3339)),
+	ensureViewportContains(&m.workerViewport, selectedLine)
+}
+
+func (m model) workerContent() string {
+	lines := []string{"Running tasks:"}
+	items := m.workerTasks()
+	if len(items) == 0 {
+		lines = append(lines, "- none")
+		return strings.Join(lines, "\n")
 	}
-	if m.activeJob.Running {
-		header = append(header, "Status: running")
-	} else {
-		header = append(header, "Status: finished")
+
+	for _, item := range items {
+		prefix := "  "
+		if item.Task.Meta.ID == m.selectedWorkerTaskID {
+			prefix = "> "
+		}
+		line := fmt.Sprintf("%s%s %s %s",
+			prefix,
+			item.Task.Meta.ID,
+			renderTaskStatusBadge(item.Task.Status.Status),
+			item.Task.Meta.Title,
+		)
+		if item.Active {
+			line += " (live)"
+		}
+		lines = append(lines, truncateTaskListLine(line, m.workerViewport.Width))
 	}
-	content := strings.Join(header, "\n") + "\n\n" + m.jobViewport.View()
-	return content
+	return strings.Join(lines, "\n")
+}
+
+func (m model) workerTasks() []workerTaskItem {
+	items := make([]workerTaskItem, 0)
+	seen := make(map[string]struct{})
+	if m.snapshot != nil {
+		for _, item := range m.snapshot.Tree {
+			if item.Task.Status.Status != "RUNNING" {
+				continue
+			}
+			if _, ok := seen[item.Task.Meta.ID]; ok {
+				continue
+			}
+			seen[item.Task.Meta.ID] = struct{}{}
+			items = append(items, workerTaskItem{
+				Task:   item.Task,
+				Active: m.activeJob != nil && m.activeJob.TaskID == item.Task.Meta.ID,
+			})
+		}
+	}
+	if m.activeJob != nil && m.activeJob.Running {
+		if _, ok := seen[m.activeJob.TaskID]; !ok {
+			items = append(items, workerTaskItem{
+				Task:   m.activeJob.Task,
+				Active: true,
+			})
+		}
+	}
+	return items
+}
+
+func (m *model) ensureWorkerSelection() {
+	items := m.workerTasks()
+	if len(items) == 0 {
+		m.selectedWorkerTaskID = ""
+		return
+	}
+	for _, item := range items {
+		if item.Task.Meta.ID == m.selectedWorkerTaskID {
+			return
+		}
+	}
+	if m.activeJob != nil {
+		for _, item := range items {
+			if item.Task.Meta.ID == m.activeJob.TaskID {
+				m.selectedWorkerTaskID = item.Task.Meta.ID
+				return
+			}
+		}
+	}
+	m.selectedWorkerTaskID = items[0].Task.Meta.ID
+}
+
+func (m *model) moveWorkerSelection(delta int) {
+	items := m.workerTasks()
+	if len(items) == 0 {
+		m.selectedWorkerTaskID = ""
+		return
+	}
+
+	index := 0
+	for i, item := range items {
+		if item.Task.Meta.ID == m.selectedWorkerTaskID {
+			index = i
+			break
+		}
+	}
+	index += delta
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(items) {
+		index = len(items) - 1
+	}
+	m.selectedWorkerTaskID = items[index].Task.Meta.ID
+	m.syncWorkerViewport()
+}
+
+func (m *model) selectedWorkerTask() *tasker.Task {
+	for _, item := range m.workerTasks() {
+		if item.Task.Meta.ID == m.selectedWorkerTaskID {
+			task := item.Task
+			return &task
+		}
+	}
+	return nil
+}
+
+func (m model) agentOutputContent(task tasker.Task) string {
+	lines := make([]string, 0, 8)
+	session, output, err := tasker.ReadTaskAgentOutput(&task)
+	if err == nil {
+		lines = append(lines,
+			fmt.Sprintf("Source: %s session %s", session.Agent, session.ID),
+		)
+		if session.RecordedAt != "" {
+			lines = append(lines, "Recorded: "+session.RecordedAt)
+		}
+		lines = append(lines, "", output)
+		return strings.Join(lines, "\n")
+	}
+
+	if m.activeJob != nil && m.activeJob.TaskID == task.Meta.ID && m.activeJob.Running {
+		return strings.Join([]string{
+			"Waiting for Codex session output...",
+			"Started: " + m.activeJob.Started.Format(time.RFC3339),
+		}, "\n")
+	}
+
+	if len(task.Status.Sessions) == 0 {
+		return "No stored agent session was found for this task."
+	}
+	return "No readable agent output was found for this task yet."
+}
+
+func (m *model) reconcileActiveJob() {
+	if m.activeJob == nil || m.snapshot == nil {
+		return
+	}
+	for _, task := range m.snapshot.Tasks {
+		if task.Meta.ID != m.activeJob.TaskID {
+			continue
+		}
+		if task.Status.Status != "RUNNING" {
+			m.activeJob = nil
+			return
+		}
+		m.activeJob.Task = task
+		return
+	}
+	m.activeJob = nil
+}
+
+func (m model) hasRunningTasks() bool {
+	if m.activeJob != nil && m.activeJob.Running {
+		return true
+	}
+	if m.snapshot == nil {
+		return false
+	}
+	for _, task := range m.snapshot.Tasks {
+		if task.Status.Status == "RUNNING" {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *model) buildVisibleTasks(query string) []visibleTaskItem {
+	if m.snapshot == nil {
+		return nil
+	}
+
+	byParent := make(map[string][]tasker.Task)
+	for _, task := range m.snapshot.Tasks {
+		byParent[task.Meta.ParentID] = append(byParent[task.Meta.ParentID], task)
+	}
+	for parentID := range byParent {
+		slices.SortFunc(byParent[parentID], func(a, b tasker.Task) int {
+			return strings.Compare(a.Meta.ID, b.Meta.ID)
+		})
+	}
+
+	childCountMemo := make(map[string]int)
+	var childCount func(string) int
+	childCount = func(id string) int {
+		if count, ok := childCountMemo[id]; ok {
+			return count
+		}
+		total := 0
+		for _, child := range byParent[id] {
+			total++
+			total += childCount(child.Meta.ID)
+		}
+		childCountMemo[id] = total
+		return total
+	}
+
+	matches := func(task tasker.Task) bool {
+		if m.statusFilter != filterAll && task.Status.Status != m.statusFilter {
+			return false
+		}
+		if m.typeFilter != filterAll && task.Meta.Type != m.typeFilter {
+			return false
+		}
+		if query == "" {
+			return true
+		}
+		haystack := strings.ToLower(strings.Join([]string{
+			task.Meta.ID,
+			task.Meta.Title,
+			task.Meta.Slug,
+			task.Status.Status,
+			task.Meta.Type,
+		}, " "))
+		return strings.Contains(haystack, query)
+	}
+
+	filtering := query != "" || m.statusFilter != filterAll || m.typeFilter != filterAll
+	items := make([]visibleTaskItem, 0, len(m.snapshot.Tasks))
+	var walk func(parentID string, depth int)
+	walk = func(parentID string, depth int) {
+		for _, task := range byParent[parentID] {
+			children := byParent[task.Meta.ID]
+			item := visibleTaskItem{
+				Task:       task,
+				Depth:      depth,
+				ChildCount: childCount(task.Meta.ID),
+				HasChild:   len(children) > 0,
+				Expanded:   m.expandedTasks[task.Meta.ID],
+			}
+			if matches(task) {
+				items = append(items, item)
+			}
+			if filtering || item.Expanded {
+				walk(task.Meta.ID, depth+1)
+			}
+		}
+	}
+	walk("", 0)
+	return items
+}
+
+func (m *model) toggleSelectedTaskExpansion() {
+	task := m.selectedTask()
+	if task == nil {
+		return
+	}
+	for _, item := range m.filtered {
+		if item.Task.Meta.ID == task.Meta.ID && item.HasChild {
+			m.expandedTasks[task.Meta.ID] = !m.expandedTasks[task.Meta.ID]
+			return
+		}
+	}
+}
+
+func (m *model) expandTaskPath(id string) {
+	if m.snapshot == nil {
+		return
+	}
+	task, err := tasker.GetTask(m.root, id)
+	if err != nil {
+		return
+	}
+	for task != nil && task.Meta.ParentID != "" {
+		m.expandedTasks[task.Meta.ParentID] = true
+		parent, err := tasker.GetTask(m.root, task.Meta.ParentID)
+		if err != nil {
+			break
+		}
+		task = parent
+	}
+}
+
+func (m *model) openSelectedTaskInEditor() (tea.Model, tea.Cmd) {
+	task := m.selectedTask()
+	if task == nil {
+		return m.withError("select a task first"), nil
+	}
+
+	target := task.TaskFile
+	status := "Opened " + target
+	if m.currentViewMode == viewResult {
+		target = task.ResultFile
+		status = "Opened " + target
+	}
+
+	cmd, err := tasker.EditorCommand(m.root, target)
+	if err != nil {
+		return m.withError("editor unavailable, file path: " + target), nil
+	}
+
+	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return externalDoneMsg{
+			Status:     status,
+			SelectedID: task.Meta.ID,
+			Err:        err,
+			Refresh:    false,
+		}
+	})
 }
 
 func (m model) renderHelp() string {
 	lines := []string{
 		"Global",
-		"tab / shift+tab switch views",
+		"0/1/2 focus current, tasks, and workers panels",
 		"/ focuses the task filter",
 		"S cycles status filters, T cycles type filters",
-		"r refreshes data, ? toggles help, q quits",
+		"R refreshes data, ? toggles help, q quits",
 		"",
 		"Tasks",
 		"up/down move selection",
+		"enter toggles subtasks and opens the current-view panel",
 		"n new task, a add child, m edit meta, c checkout",
 		"u import tasks, I create import template, d delete",
 		"e open task/project documents in the configured editor",
 		"x run `tasker do`, s resume session, f fork session",
-		"enter opens the Current view for the selected task",
+		"",
+		"Current View",
+		"t shows task.md, r shows result.md, s shows status, w shows agent output",
+		"e opens the selected task or result in your editor",
+		"x runs `tasker do`, S resumes a stored session, F forks one",
+		"",
+		"Workers",
+		"up/down move between running tasks",
+		"enter opens the selected task's agent output",
 		"",
 		"Forms",
 		"tab moves between fields",
@@ -1400,6 +1694,7 @@ func (m model) renderConfirm() string {
 }
 
 func (m *model) newTaskForm() *formModal {
+	openBehavior := defaultOpenBehavior(m.root)
 	form := &formModal{
 		Kind:        modalNewTask,
 		Title:       "New Task",
@@ -1408,7 +1703,7 @@ func (m *model) newTaskForm() *formModal {
 			newTextField("title", "Title", "", "Untitled task", "Defaults to `Untitled task` if left blank."),
 			newSelectField("type", "Type", tasker.ValidTaskTypes(), "feature", ""),
 			newSelectField("checkout_mode", "Checkout", []string{"none", "checkout", "branch-checkout"}, "none", "Optional current-workspace checkout after creation."),
-			newSelectField("open_behavior", "Open editor", []string{"no-open", "open"}, "no-open", ""),
+			newSelectField("open_behavior", "Open editor", []string{"no-open", "open"}, openBehavior, ""),
 			newSelectField("open_target", "Open target", []string{"task", "instructions", "declaration", "result", "meta"}, "task", ""),
 		},
 	}
@@ -1423,6 +1718,7 @@ func (m *model) newChildTaskForm() *formModal {
 	} else if m.snapshot != nil && m.snapshot.Current.Task != nil {
 		parentID = m.snapshot.Current.Task.Meta.ID
 	}
+	openBehavior := defaultOpenBehavior(m.root)
 	form := &formModal{
 		Kind:        modalAddTask,
 		Title:       "Add Child Task",
@@ -1431,7 +1727,7 @@ func (m *model) newChildTaskForm() *formModal {
 			newTextField("title", "Title", "", "Untitled task", ""),
 			newSelectField("type", "Type", tasker.ValidTaskTypes(), "feature", ""),
 			newTextField("parent_id", "Parent ID", parentID, "029", "Leave empty only if you want inference to fail visibly."),
-			newSelectField("open_behavior", "Open editor", []string{"no-open", "open"}, "no-open", ""),
+			newSelectField("open_behavior", "Open editor", []string{"no-open", "open"}, openBehavior, ""),
 			newSelectField("open_target", "Open target", []string{"task", "instructions", "declaration", "result", "meta"}, "task", ""),
 		},
 	}
@@ -1474,6 +1770,7 @@ func (m *model) newImportForm() *formModal {
 	if task := m.selectedTask(); task != nil {
 		parentID = task.Meta.ID
 	}
+	openBehavior := defaultOpenBehavior(m.root)
 	form := &formModal{
 		Kind:        modalImport,
 		Title:       "Import Tasks",
@@ -1482,7 +1779,7 @@ func (m *model) newImportForm() *formModal {
 			newTextField("path", "Import path", latest, ".tasker/imports/import-*.json", "Leave blank to use the most recent import file."),
 			newTextField("parent_id", "Parent ID", parentID, "", "Optional parent attachment for imported roots."),
 			newSelectField("checkout_mode", "Checkout", []string{"none", "checkout", "branch-checkout"}, "none", ""),
-			newSelectField("open_behavior", "Open editor", []string{"no-open", "open"}, "no-open", ""),
+			newSelectField("open_behavior", "Open editor", []string{"no-open", "open"}, openBehavior, ""),
 			newSelectField("open_target", "Open target", []string{"task", "instructions", "declaration", "result", "meta"}, "task", ""),
 		},
 	}
@@ -1503,6 +1800,13 @@ func (m *model) newOpenDocForm() *formModal {
 	return form
 }
 
+func defaultOpenBehavior(root string) string {
+	if editor, err := tasker.ResolveEditor(root); err == nil && editor != "" {
+		return "open"
+	}
+	return "no-open"
+}
+
 func refreshCmd(root string) tea.Cmd {
 	return func() tea.Msg {
 		snapshot, err := tasker.LoadWorkspaceSnapshot(root)
@@ -1513,9 +1817,9 @@ func refreshCmd(root string) tea.Cmd {
 	}
 }
 
-func pollJobCmd() tea.Cmd {
-	return tea.Tick(200*time.Millisecond, func(time.Time) tea.Msg {
-		return jobTickMsg{}
+func workspaceTickCmd() tea.Cmd {
+	return tea.Tick(750*time.Millisecond, func(time.Time) tea.Msg {
+		return workspaceTickMsg{}
 	})
 }
 
@@ -1576,6 +1880,57 @@ func overlay(base, modal string) string {
 		lipgloss.WithWhitespaceChars(" "),
 		lipgloss.WithWhitespaceForeground(lipgloss.Color("236")),
 	)
+}
+
+func readTaskFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(string(data), "\n"), nil
+}
+
+func ensureViewportContains(vp *viewport.Model, line int) {
+	if line < vp.YOffset {
+		vp.SetYOffset(maxInt(0, line))
+		return
+	}
+	bottom := vp.YOffset + vp.Height - 1
+	if line > bottom {
+		vp.SetYOffset(maxInt(0, line-vp.Height+1))
+	}
+}
+
+func truncateTaskListLine(line string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(line) <= width {
+		return line
+	}
+	return runewidth.Truncate(line, width, "...")
+}
+
+func renderTaskStatusBadge(status string) string {
+	badge := "[" + strings.ReplaceAll(strings.ToUpper(strings.TrimSpace(status)), "_", " ") + "]"
+
+	color := lipgloss.Color("51")
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "NEW":
+		color = lipgloss.Color("34")
+	case "PLANNED":
+		color = lipgloss.Color("51")
+	case "IN_PROGRESS", "RUNNING":
+		color = lipgloss.Color("214")
+	case "DONE":
+		color = lipgloss.Color("42")
+	case "BLOCKED":
+		color = lipgloss.Color("196")
+	case "HANDOFF", "REVIEW", "AWAITING_ACTION":
+		color = lipgloss.Color("170")
+	}
+
+	return lipgloss.NewStyle().Bold(true).Foreground(color).Render(badge)
 }
 
 func maxInt(a, b int) int {

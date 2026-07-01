@@ -401,17 +401,24 @@ Opens the native Tasker terminal UI.
 Behavior:
 
 - loads tasks, status counts, and the current workspace directly from `internal/tasker`
-- shows dashboard, task explorer, current workspace, and jobs views
+- shows a single lazygit-style screen with three numbered panels
+- keeps the task tree and worker output in the left column and the selected task view on the right
 - supports keyboard-driven `new`, `add`, `meta`, `checkout`, `import`, `import template`, `delete`, `do`, `resume`, and `fork` flows
-- uses external subprocesses only for editor launches and stored session resume/fork commands
-- refreshes the task tree, current workspace, and detail panes after mutating actions
+- uses external subprocesses for editor launches, detached `tasker do` runs, and stored session resume/fork commands
+- refreshes the task tree, current view, and worker panes after mutating actions
+- defaults `Open editor` to `open` in task/import forms when an editor is configured via `.tasker/config.yaml` or `$EDITOR`
 
 Key workflows:
 
-- `tab` and `shift+tab`: switch views
+- `0`, `1`, `2`: focus the current-view, task-tree, and workers panels
 - `/`: focus the task filter
 - `S` and `T`: cycle status and type filters
-- `n`, `a`, `m`, `c`, `u`, `I`, `d`, `e`, `x`, `s`, `f`: open action flows
+- `enter`: expand/collapse subtasks from the tree and open the selected task on the right
+- `enter` in the workers panel: open the selected running task's agent output on the right
+- `t`, `r`, `s`, `w`: switch the current-view panel between `task.md`, `result.md`, task status, and agent output
+- `n`, `a`, `m`, `c`, `u`, `I`, `d`, `e`, `x`, `s`, `f`: open task actions from the tree panel
+- `e`, `x`, `S`, `F`: edit, run, resume, or fork from the current-view panel
+- `R`: refresh data
 - `?`: show in-app help
 
 Example:
@@ -468,7 +475,6 @@ Behavior:
 - refreshes `.tasker/current/*` for the target task
 - marks the task `RUNNING` before the headless session starts
 - runs `codex exec` from the repository root in headless mode
-- shows a lightweight dot-based loading line while the headless run is quiet
 - suppresses the noisy `Reading additional input from stdin...` notice from the underlying exec process
 - captures the new session ID from the machine-readable exec stream when available
 - falls back to the persisted `~/.codex/sessions` metadata for matching `codex_exec` runs when the stream does not expose `session_meta`

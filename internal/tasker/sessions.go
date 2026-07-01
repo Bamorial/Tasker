@@ -3,6 +3,7 @@ package tasker
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -256,4 +257,138 @@ func readPersistedCodexSessionMeta(path string) (string, time.Time, string, bool
 
 func normalizeSessionCWD(path string) string {
 	return strings.ToLower(filepath.Clean(path))
+}
+
+type persistedCodexEventMessage struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+}
+
+type persistedCodexResponseItem struct {
+	Type    string `json:"type"`
+	Role    string `json:"role"`
+	Content []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content"`
+}
+
+type persistedCodexSessionEvent struct {
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+func ReadTaskAgentOutput(task *Task) (TaskSession, string, error) {
+	for i := len(task.Status.Sessions) - 1; i >= 0; i-- {
+		session := task.Status.Sessions[i]
+		if strings.TrimSpace(strings.ToLower(session.Agent)) != "codex" {
+			continue
+		}
+
+		output, err := ReadCodexSessionOutput(session.ID)
+		if err == nil {
+			return session, output, nil
+		}
+		if !os.IsNotExist(err) {
+			return session, "", err
+		}
+	}
+
+	return TaskSession{}, "", os.ErrNotExist
+}
+
+func ReadCodexSessionOutput(sessionID string) (string, error) {
+	path, err := findPersistedCodexSessionPath(sessionID)
+	if err != nil {
+		return "", err
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	lines := make([]string, 0, 32)
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var event persistedCodexSessionEvent
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			continue
+		}
+
+		switch event.Type {
+		case "event_msg":
+			var payload persistedCodexEventMessage
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				continue
+			}
+			if payload.Type == "agent_message" {
+				appendTranscriptLine(&lines, payload.Message)
+			}
+		case "response_item":
+			var payload persistedCodexResponseItem
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				continue
+			}
+			if payload.Type != "message" || payload.Role != "assistant" {
+				continue
+			}
+			for _, content := range payload.Content {
+				if content.Type == "output_text" {
+					appendTranscriptLine(&lines, content.Text)
+				}
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
+	if len(lines) == 0 {
+		return "", os.ErrNotExist
+	}
+	return strings.Join(lines, "\n\n"), nil
+}
+
+func appendTranscriptLine(lines *[]string, value string) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return
+	}
+	*lines = append(*lines, trimmed)
+}
+
+func findPersistedCodexSessionPath(sessionID string) (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+
+	sessionsRoot := filepath.Join(homeDir, ".codex", "sessions")
+	if _, err := os.Stat(sessionsRoot); err != nil {
+		return "", err
+	}
+
+	suffix := "-" + strings.TrimSpace(sessionID) + ".jsonl"
+	found := ""
+	err = filepath.WalkDir(sessionsRoot, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() || filepath.Ext(path) != ".jsonl" {
+			return nil
+		}
+		if strings.HasSuffix(filepath.Base(path), suffix) {
+			found = path
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if found == "" {
+		return "", fmt.Errorf("%w: codex session %s", os.ErrNotExist, sessionID)
+	}
+	return found, nil
 }

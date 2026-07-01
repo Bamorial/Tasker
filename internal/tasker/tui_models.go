@@ -143,6 +143,14 @@ func ReadCurrentWorkspaceSnapshot(root string) (*CurrentWorkspaceSnapshot, error
 		return snapshot, nil
 	}
 
+	path, err := findTaskPathByID(root, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if path == "" {
+		return snapshot, nil
+	}
+
 	task, err := GetTask(root, taskID)
 	if err != nil {
 		return nil, err

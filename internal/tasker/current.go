@@ -36,6 +36,24 @@ func WriteCurrentWorkspace(root string, task *Task, input CurrentWorkspaceInput)
 	return nil
 }
 
+func ClearCurrentWorkspace(root string) error {
+	workspacePath := filepath.Join(root, TaskerDirName, "current", "WORKSPACE.md")
+	filesPath := filepath.Join(root, TaskerDirName, "current", "FILES.md")
+	contextPath := filepath.Join(root, TaskerDirName, "current", "CONTEXT.json")
+
+	if err := os.WriteFile(workspacePath, []byte(workspaceTemplate()), 0o644); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filesPath, []byte(filesTemplate()), 0o644); err != nil {
+		return err
+	}
+	if err := os.WriteFile(contextPath, []byte("{}\n"), 0o644); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func taskParentChain(root string, task *Task) ([]Task, error) {
 	if task.Meta.ParentID == "" {
 		return nil, nil
