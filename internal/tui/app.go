@@ -411,6 +411,15 @@ func (m *model) updateTasksViewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.form = m.newMetaForm(*task)
 		return m, nil
+	case keyMatches(m.keybindings.Current, "show_diff", key):
+		task := m.selectedTask()
+		if task == nil {
+			return m.withError("select a task first"), nil
+		}
+		m.currentViewMode = viewDiff
+		m.focus = panelCurrent
+		m.syncDerivedState()
+		return m, nil
 	case keyMatches(m.keybindings.Tasks, "checkout", key):
 		task := m.selectedTask()
 		if task == nil {

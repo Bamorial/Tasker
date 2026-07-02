@@ -23,7 +23,10 @@ func TestLoadConfigReturnsDefaultTUIKeybindingsWhenFileMissing(t *testing.T) {
 	if got := cfg.TUI.Keybindings.Tasks["open_current"]; len(got) != 1 || got[0] != "enter" {
 		t.Fatalf("expected default task open key, got %#v", got)
 	}
-	if got := cfg.TUI.Keybindings.Current["show_diff"]; len(got) != 1 || got[0] != "d" {
+	if got := cfg.TUI.Keybindings.Tasks["checkout"]; len(got) != 1 || got[0] != "C" {
+		t.Fatalf("expected default checkout key, got %#v", got)
+	}
+	if got := cfg.TUI.Keybindings.Current["show_diff"]; len(got) != 1 || got[0] != "c" {
 		t.Fatalf("expected default diff view key, got %#v", got)
 	}
 }
@@ -60,7 +63,10 @@ func TestLoadConfigMergesCustomTUIKeybindingsWithDefaults(t *testing.T) {
 	if got := cfg.TUI.Keybindings.Tasks["delete_task"]; len(got) != 1 || got[0] != "d" {
 		t.Fatalf("expected default delete fallback, got %#v", got)
 	}
-	if got := cfg.TUI.Keybindings.Current["show_diff"]; len(got) != 1 || got[0] != "d" {
+	if got := cfg.TUI.Keybindings.Tasks["checkout"]; len(got) != 1 || got[0] != "C" {
+		t.Fatalf("expected default checkout fallback, got %#v", got)
+	}
+	if got := cfg.TUI.Keybindings.Current["show_diff"]; len(got) != 1 || got[0] != "c" {
 		t.Fatalf("expected default diff key fallback, got %#v", got)
 	}
 }

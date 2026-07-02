@@ -514,7 +514,7 @@ func TestCurrentViewOShowsAgentOutput(t *testing.T) {
 	}
 }
 
-func TestCurrentViewDShowsGitDiffWithStyledAdditionsAndDeletions(t *testing.T) {
+func TestCurrentViewCShowsGitDiffWithStyledAdditionsAndDeletions(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	lipgloss.SetHasDarkBackground(true)
 
@@ -555,7 +555,7 @@ func TestCurrentViewDShowsGitDiffWithStyledAdditionsAndDeletions(t *testing.T) {
 	got.currentViewMode = viewTask
 	got.syncDerivedState()
 
-	opened, _ := got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	opened, _ := got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
 	after := *(opened.(*model))
 
 	if after.currentViewMode != viewDiff {
@@ -575,6 +575,59 @@ func TestCurrentViewDShowsGitDiffWithStyledAdditionsAndDeletions(t *testing.T) {
 	}
 	if !strings.Contains(after.currentViewport.View(), "1 after") {
 		t.Fatalf("expected right-side current content, got %q", after.currentViewport.View())
+	}
+}
+
+func TestTasksPanelCOpensGitDiffInCurrentPanel(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	lipgloss.SetHasDarkBackground(true)
+
+	root := t.TempDir()
+	if err := tasker.InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	initializeGitRepoForTUI(t, root)
+
+	if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("before\nkeep\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile tracked file: %v", err)
+	}
+
+	created, err := tasker.CreateTask(root, tasker.CreateTaskInput{Title: "Diff from tasks panel", Type: "feature"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if _, err := tasker.CheckoutTask(root, created.ID, tasker.CheckoutTaskInput{NoBranch: true}); err != nil {
+		t.Fatalf("CheckoutTask: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("after\nkeep\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile tracked file update: %v", err)
+	}
+
+	m := newModel(root)
+	m.width = 120
+	m.height = 40
+	m.focus = panelTasks
+	updated, _ := m.Update(snapshotMsg{Snapshot: mustSnapshot(t, root)})
+	got := updated.(model)
+	got.focus = panelTasks
+	got.syncDerivedState()
+
+	opened, _ := got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	after := *(opened.(*model))
+
+	if after.focus != panelCurrent {
+		t.Fatalf("expected focus to move to current panel, got %v", after.focus)
+	}
+	if after.currentViewMode != viewDiff {
+		t.Fatalf("expected diff view, got %s", after.currentViewMode)
+	}
+	if !strings.Contains(after.currentViewport.View(), "View: git diff") {
+		t.Fatalf("expected current viewport to identify git diff view, got %q", after.currentViewport.View())
+	}
+	if !strings.Contains(after.currentViewport.View(), "File: tracked.txt") {
+		t.Fatalf("expected tracked file header, got %q", after.currentViewport.View())
 	}
 }
 
