@@ -32,4 +32,5 @@ func init() {
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(tuiCmd)
 	rootCmd.AddCommand(versionCmd)
+	rootCmd.AddCommand(whoCmd)
 }

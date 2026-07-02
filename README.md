@@ -83,6 +83,7 @@ Tasker currently implements:
 - `tasker status`
 - `tasker status <id>`
 - `tasker version`
+- `tasker who`
 
 Running `tasker` with no arguments opens the native Tasker terminal UI. Use `tasker help` to see the command list.
 
@@ -237,6 +238,7 @@ tui:
       show_task: ["t"]
       show_result: ["r"]
       show_status: ["s"]
+      show_diff: ["d"]
       show_agent: ["w"]
       open_output: ["o"]
       edit_doc: ["e"]
@@ -485,6 +487,7 @@ Behavior:
 - refreshes the task tree, current view, and worker panes after mutating actions
 - watches `.tasker/` for external file changes so task status, results, and live output stay in sync without manual refresh
 - can read a running task's Codex transcript from `sessions/execution.json` plus the persisted `~/.codex/sessions` data even before the task-local session index is written
+- can show a task-scoped side-by-side Git diff in the current panel, limited to files changed during that task and excluding Tasker bookkeeping files
 - defaults `Open editor` to `open` in task/import forms when an editor is configured via `.tasker/config.yaml` or `$EDITOR`
 
 Key workflows:
@@ -492,7 +495,7 @@ Key workflows:
 - all defaults come from `.tasker/config.yaml` under `tui.keybindings`
 - `global` controls panel focus, help, refresh, filtering, and filter cycling
 - `tasks` controls task-tree navigation plus task actions like new, add, checkout, delete, do, resume, fork, and open output
-- `current` controls the right-hand panel view switching and task actions
+- `current` controls the right-hand panel view switching, including the Git diff view, plus task actions
 - `workers` controls the running-task list navigation, output opening, and stop confirmation entrypoint
 - `viewport`, `filter`, `form`, `session`, and `confirm` control the shared modal and scrolling shortcuts
 

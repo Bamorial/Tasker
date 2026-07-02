@@ -514,6 +514,70 @@ func TestCurrentViewOShowsAgentOutput(t *testing.T) {
 	}
 }
 
+func TestCurrentViewDShowsGitDiffWithStyledAdditionsAndDeletions(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	lipgloss.SetHasDarkBackground(true)
+
+	root := t.TempDir()
+	if err := tasker.InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+
+	initializeGitRepoForTUI(t, root)
+
+	if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("before\nkeep\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile tracked file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "unrelated.txt"), []byte("repo-dirty-before-task\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile unrelated file: %v", err)
+	}
+
+	created, err := tasker.CreateTask(root, tasker.CreateTaskInput{Title: "Diff view", Type: "feature"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if _, err := tasker.CheckoutTask(root, created.ID, tasker.CheckoutTaskInput{NoBranch: true}); err != nil {
+		t.Fatalf("CheckoutTask: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("after\nkeep\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile tracked file update: %v", err)
+	}
+
+	m := newModel(root)
+	m.width = 120
+	m.height = 40
+	m.focus = panelCurrent
+	m.currentViewMode = viewTask
+	updated, _ := m.Update(snapshotMsg{Snapshot: mustSnapshot(t, root)})
+	got := updated.(model)
+	got.focus = panelCurrent
+	got.currentViewMode = viewTask
+	got.syncDerivedState()
+
+	opened, _ := got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	after := *(opened.(*model))
+
+	if after.currentViewMode != viewDiff {
+		t.Fatalf("expected diff view, got %s", after.currentViewMode)
+	}
+	if !strings.Contains(after.currentViewport.View(), "View: git diff") {
+		t.Fatalf("expected current viewport to identify git diff view, got %q", after.currentViewport.View())
+	}
+	if !strings.Contains(after.currentViewport.View(), "File: tracked.txt") {
+		t.Fatalf("expected tracked file header, got %q", after.currentViewport.View())
+	}
+	if strings.Contains(after.currentViewport.View(), "unrelated.txt") {
+		t.Fatalf("expected unrelated preexisting diff to be hidden, got %q", after.currentViewport.View())
+	}
+	if !strings.Contains(after.currentViewport.View(), "1 before") {
+		t.Fatalf("expected left-side baseline content, got %q", after.currentViewport.View())
+	}
+	if !strings.Contains(after.currentViewport.View(), "1 after") {
+		t.Fatalf("expected right-side current content, got %q", after.currentViewport.View())
+	}
+}
+
 func TestCurrentViewScrollPersistsAcrossSnapshotRefresh(t *testing.T) {
 	root := t.TempDir()
 	if err := tasker.InitializeWorkspace(root); err != nil {
@@ -761,6 +825,27 @@ func setTUIEnvForTest(t *testing.T, name, value string) {
 			t.Fatalf("restore env %s: %v", name, err)
 		}
 	})
+}
+
+func initializeGitRepoForTUI(t *testing.T, root string) {
+	t.Helper()
+
+	runGitCommandForTUI(t, root, "init", "-b", "main")
+	runGitCommandForTUI(t, root, "config", "user.email", "tasker@example.com")
+	runGitCommandForTUI(t, root, "config", "user.name", "Tasker Tests")
+	runGitCommandForTUI(t, root, "add", ".")
+	runGitCommandForTUI(t, root, "commit", "-m", "init")
+}
+
+func runGitCommandForTUI(t *testing.T, root string, args ...string) {
+	t.Helper()
+
+	cmd := exec.Command("git", args...)
+	cmd.Dir = root
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, string(output))
+	}
 }
 
 func unsetTUIEnvForTest(t *testing.T, name string) {

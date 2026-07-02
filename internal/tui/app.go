@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +34,7 @@ const (
 	viewTask   currentViewMode = "task"
 	viewResult currentViewMode = "result"
 	viewStatus currentViewMode = "status"
+	viewDiff   currentViewMode = "diff"
 	viewAgent  currentViewMode = "agent"
 )
 
@@ -480,6 +482,10 @@ func (m *model) updateCurrentViewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case keyMatches(m.keybindings.Current, "show_status", key):
 		m.currentViewMode = viewStatus
+		m.syncCurrentViewport(true)
+		return m, nil
+	case keyMatches(m.keybindings.Current, "show_diff", key):
+		m.currentViewMode = viewDiff
 		m.syncCurrentViewport(true)
 		return m, nil
 	case keyMatches(m.keybindings.Current, "show_agent", key):
@@ -1239,7 +1245,7 @@ func (m model) renderFooter() string {
 		keyStyle.Render(fmt.Sprintf("%s status filter", keyLabel(m.keybindings.Global, "cycle_status_filter"))),
 		keyStyle.Render(fmt.Sprintf("%s type filter", keyLabel(m.keybindings.Global, "cycle_type_filter"))),
 		keyStyle.Render(fmt.Sprintf("%s open task/output  %s/%s delete/stop", keyLabel(m.keybindings.Tasks, "open_current"), keyLabel(m.keybindings.Tasks, "delete_task"), keyLabel(m.keybindings.Workers, "stop_task"))),
-		keyStyle.Render(fmt.Sprintf("%s/%s/%s/%s switch current view", keyLabel(m.keybindings.Current, "show_task"), keyLabel(m.keybindings.Current, "show_result"), keyLabel(m.keybindings.Current, "show_status"), keyLabel(m.keybindings.Current, "show_agent"))),
+		keyStyle.Render(fmt.Sprintf("%s/%s/%s/%s/%s switch current view", keyLabel(m.keybindings.Current, "show_task"), keyLabel(m.keybindings.Current, "show_result"), keyLabel(m.keybindings.Current, "show_status"), keyLabel(m.keybindings.Current, "show_diff"), keyLabel(m.keybindings.Current, "show_agent"))),
 		keyStyle.Render(fmt.Sprintf("%s edit  %s do  %s resume  %s fork", keyLabel(m.keybindings.Current, "edit_doc"), keyLabel(m.keybindings.Current, "run_do"), keyLabel(m.keybindings.Current, "resume"), keyLabel(m.keybindings.Current, "fork_session"))),
 		keyStyle.Render(fmt.Sprintf("%s refresh", keyLabel(m.keybindings.Global, "refresh"))),
 		keyStyle.Render(fmt.Sprintf("%s help", keyLabel(m.keybindings.Global, "toggle_help"))),
@@ -1371,6 +1377,8 @@ func (m model) currentContent() string {
 			return "Error loading status: " + err.Error()
 		}
 		return m.decorateCurrentContent(*task, "status", strings.Join(lines, "\n"))
+	case viewDiff:
+		return m.decorateCurrentContent(*task, "git diff", m.repoDiffContent(*task))
 	case viewAgent:
 		return m.decorateCurrentContent(*task, "agent output", m.agentOutputContent(*task))
 	default:
@@ -1392,6 +1400,22 @@ func (m model) decorateCurrentContent(task tasker.Task, label, content string) s
 		content,
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (m model) repoDiffContent(task tasker.Task) string {
+	repo, err := tasker.OpenGitRepo(m.root)
+	if err != nil {
+		return "Git diff unavailable: " + err.Error()
+	}
+
+	diff, err := repo.TaskDiff(&task)
+	if err != nil {
+		return "Error loading git diff: " + err.Error()
+	}
+	if len(diff) == 0 {
+		return "No task-scoped changes yet."
+	}
+	return renderSideBySideDiffContent(diff, maxInt(m.currentViewport.Width, 80))
 }
 
 func (m *model) syncWorkerViewport() {
@@ -1758,7 +1782,7 @@ func (m model) renderHelp() string {
 		fmt.Sprintf("%s run `tasker do`, %s run `tasker resume`, %s fork a stored session", keyLabel(m.keybindings.Tasks, "run_do"), keyLabel(m.keybindings.Tasks, "resume"), keyLabel(m.keybindings.Tasks, "fork_session")),
 		"",
 		"Current View",
-		fmt.Sprintf("%s shows task.md, %s shows result.md, %s shows status, %s/%s show agent output", keyLabel(m.keybindings.Current, "show_task"), keyLabel(m.keybindings.Current, "show_result"), keyLabel(m.keybindings.Current, "show_status"), keyLabel(m.keybindings.Current, "show_agent"), keyLabel(m.keybindings.Current, "open_output")),
+		fmt.Sprintf("%s shows task.md, %s shows result.md, %s shows status, %s shows git diff, %s/%s show agent output", keyLabel(m.keybindings.Current, "show_task"), keyLabel(m.keybindings.Current, "show_result"), keyLabel(m.keybindings.Current, "show_status"), keyLabel(m.keybindings.Current, "show_diff"), keyLabel(m.keybindings.Current, "show_agent"), keyLabel(m.keybindings.Current, "open_output")),
 		fmt.Sprintf("%s opens the selected task or result in your editor", keyLabel(m.keybindings.Current, "edit_doc")),
 		fmt.Sprintf("%s run `tasker do`, %s run `tasker resume`, %s fork a stored session", keyLabel(m.keybindings.Current, "run_do"), keyLabel(m.keybindings.Current, "resume"), keyLabel(m.keybindings.Current, "fork_session")),
 		"",
@@ -2082,6 +2106,288 @@ func renderTaskStatusBadge(status string) string {
 	}
 
 	return lipgloss.NewStyle().Bold(true).Foreground(color).Render(badge)
+}
+
+func renderDiffLine(line string) string {
+	switch {
+	case strings.HasPrefix(line, "+++"), strings.HasPrefix(line, "---"):
+		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("117")).Render(line)
+	case strings.HasPrefix(line, "diff --git"), strings.HasPrefix(line, "index "), strings.HasPrefix(line, "@@"):
+		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("228")).Render(line)
+	case strings.HasPrefix(line, "+"):
+		return lipgloss.NewStyle().Background(lipgloss.Color("22")).Foreground(lipgloss.Color("230")).Render(line)
+	case strings.HasPrefix(line, "-"):
+		return lipgloss.NewStyle().Background(lipgloss.Color("52")).Foreground(lipgloss.Color("230")).Render(line)
+	case strings.HasPrefix(line, "Untracked files:"):
+		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214")).Render(line)
+	default:
+		return line
+	}
+}
+
+type sideBySideRow struct {
+	left       string
+	right      string
+	leftKind   string
+	rightKind  string
+	showNumber bool
+	leftLine   int
+	rightLine  int
+}
+
+func renderSideBySideDiffContent(files []tasker.TaskFileDiff, width int) string {
+	if len(files) == 0 {
+		return "No task-scoped changes yet."
+	}
+
+	totalWidth := maxInt(width, 80)
+	gutter := " | "
+	columnWidth := maxInt((totalWidth-len(gutter))/2, 20)
+	lines := make([]string, 0, len(files)*8)
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("228"))
+
+	for i, file := range files {
+		if i > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, headerStyle.Render("File: "+file.Path))
+		lines = append(lines, renderSideBySideHeader(columnWidth, gutter))
+		for _, row := range buildSideBySideRows(file.Before, file.After) {
+			lines = append(lines, renderSideBySideRow(row, columnWidth, gutter))
+		}
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func renderSideBySideHeader(columnWidth int, gutter string) string {
+	header := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("117"))
+	left := fitSideBySideText("OLD", columnWidth)
+	right := fitSideBySideText("NEW", columnWidth)
+	return header.Render(left + gutter + right)
+}
+
+func buildSideBySideRows(before, after string) []sideBySideRow {
+	beforeLines := splitDiffLines(before)
+	afterLines := splitDiffLines(after)
+	ops := diffLineOps(beforeLines, afterLines)
+	ranges := diffDisplayRanges(ops, 2)
+	if len(ranges) == 0 {
+		return []sideBySideRow{{
+			left:      "(no text changes)",
+			right:     "(no text changes)",
+			leftKind:  "meta",
+			rightKind: "meta",
+		}}
+	}
+
+	rows := make([]sideBySideRow, 0, len(ops))
+	for idx, bounds := range ranges {
+		if idx > 0 {
+			rows = append(rows, sideBySideRow{
+				left:      "...",
+				right:     "...",
+				leftKind:  "meta",
+				rightKind: "meta",
+			})
+		}
+
+		leftLine, rightLine := 1, 1
+		for i := 0; i < bounds.start; i++ {
+			switch ops[i].kind {
+			case "equal":
+				leftLine++
+				rightLine++
+			case "delete":
+				leftLine++
+			case "insert":
+				rightLine++
+			}
+		}
+
+		for i := bounds.start; i < bounds.end; {
+			if ops[i].kind == "equal" {
+				rows = append(rows, sideBySideRow{
+					left:       ops[i].left,
+					right:      ops[i].right,
+					leftKind:   "equal",
+					rightKind:  "equal",
+					showNumber: true,
+					leftLine:   leftLine,
+					rightLine:  rightLine,
+				})
+				leftLine++
+				rightLine++
+				i++
+				continue
+			}
+
+			blockStart := i
+			for i < bounds.end && ops[i].kind != "equal" {
+				i++
+			}
+			block := ops[blockStart:i]
+			deletes := make([]string, 0, len(block))
+			inserts := make([]string, 0, len(block))
+			for _, op := range block {
+				switch op.kind {
+				case "delete":
+					deletes = append(deletes, op.left)
+				case "insert":
+					inserts = append(inserts, op.right)
+				}
+			}
+			blockRows := maxInt(len(deletes), len(inserts))
+			for j := 0; j < blockRows; j++ {
+				row := sideBySideRow{showNumber: true}
+				if j < len(deletes) {
+					row.left = deletes[j]
+					row.leftKind = "delete"
+					row.leftLine = leftLine
+					leftLine++
+				}
+				if j < len(inserts) {
+					row.right = inserts[j]
+					row.rightKind = "insert"
+					row.rightLine = rightLine
+					rightLine++
+				}
+				rows = append(rows, row)
+			}
+		}
+	}
+
+	return rows
+}
+
+type lineOp struct {
+	kind  string
+	left  string
+	right string
+}
+
+type displayRange struct {
+	start int
+	end   int
+}
+
+func diffLineOps(before, after []string) []lineOp {
+	lcs := buildLCSMatrix(before, after)
+	ops := make([]lineOp, 0, len(before)+len(after))
+	i, j := 0, 0
+	for i < len(before) && j < len(after) {
+		switch {
+		case before[i] == after[j]:
+			ops = append(ops, lineOp{kind: "equal", left: before[i], right: after[j]})
+			i++
+			j++
+		case lcs[i+1][j] >= lcs[i][j+1]:
+			ops = append(ops, lineOp{kind: "delete", left: before[i]})
+			i++
+		default:
+			ops = append(ops, lineOp{kind: "insert", right: after[j]})
+			j++
+		}
+	}
+	for ; i < len(before); i++ {
+		ops = append(ops, lineOp{kind: "delete", left: before[i]})
+	}
+	for ; j < len(after); j++ {
+		ops = append(ops, lineOp{kind: "insert", right: after[j]})
+	}
+	return ops
+}
+
+func buildLCSMatrix(before, after []string) [][]int {
+	matrix := make([][]int, len(before)+1)
+	for i := range matrix {
+		matrix[i] = make([]int, len(after)+1)
+	}
+	for i := len(before) - 1; i >= 0; i-- {
+		for j := len(after) - 1; j >= 0; j-- {
+			if before[i] == after[j] {
+				matrix[i][j] = matrix[i+1][j+1] + 1
+			} else {
+				matrix[i][j] = maxInt(matrix[i+1][j], matrix[i][j+1])
+			}
+		}
+	}
+	return matrix
+}
+
+func diffDisplayRanges(ops []lineOp, context int) []displayRange {
+	ranges := make([]displayRange, 0, 4)
+	for i, op := range ops {
+		if op.kind == "equal" {
+			continue
+		}
+		start := maxInt(i-context, 0)
+		end := minInt(i+context+1, len(ops))
+		if len(ranges) == 0 || start > ranges[len(ranges)-1].end {
+			ranges = append(ranges, displayRange{start: start, end: end})
+			continue
+		}
+		if end > ranges[len(ranges)-1].end {
+			ranges[len(ranges)-1].end = end
+		}
+	}
+	return ranges
+}
+
+func renderSideBySideRow(row sideBySideRow, columnWidth int, gutter string) string {
+	leftText := row.left
+	rightText := row.right
+	if row.showNumber {
+		if row.leftKind != "" {
+			leftText = strconv.Itoa(row.leftLine) + " " + leftText
+		}
+		if row.rightKind != "" {
+			rightText = strconv.Itoa(row.rightLine) + " " + rightText
+		}
+	}
+
+	left := styleSideBySideCell(fitSideBySideText(leftText, columnWidth), row.leftKind)
+	right := styleSideBySideCell(fitSideBySideText(rightText, columnWidth), row.rightKind)
+	return left + gutter + right
+}
+
+func fitSideBySideText(text string, width int) string {
+	text = strings.ReplaceAll(text, "\t", "    ")
+	if runewidth.StringWidth(text) > width {
+		return runewidth.Truncate(text, width-1, "…")
+	}
+	padding := width - runewidth.StringWidth(text)
+	if padding <= 0 {
+		return text
+	}
+	return text + strings.Repeat(" ", padding)
+}
+
+func styleSideBySideCell(text, kind string) string {
+	style := lipgloss.NewStyle()
+	switch kind {
+	case "delete":
+		style = style.Background(lipgloss.Color("52")).Foreground(lipgloss.Color("230"))
+	case "insert":
+		style = style.Background(lipgloss.Color("22")).Foreground(lipgloss.Color("230"))
+	case "equal":
+		style = style.Foreground(lipgloss.Color("245"))
+	case "meta":
+		style = style.Foreground(lipgloss.Color("241")).Italic(true)
+	}
+	return style.Render(text)
+}
+
+func splitDiffLines(content string) []string {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	if content == "" {
+		return nil
+	}
+	lines := strings.Split(content, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
 }
 
 func maxInt(a, b int) int {

@@ -91,6 +91,7 @@ type Task struct {
 	Status           TaskStatus
 	Path             string
 	MetaFile         string
+	ContextFile      string
 	TaskFile         string
 	InstructionsFile string
 	DeclarationFile  string
@@ -479,6 +480,7 @@ func loadTaskFromPath(path string) (Task, error) {
 		Status:           status,
 		Path:             path,
 		MetaFile:         metaPath,
+		ContextFile:      filepath.Join(path, "context.json"),
 		TaskFile:         filepath.Join(path, "task.md"),
 		InstructionsFile: filepath.Join(path, "instructions.md"),
 		DeclarationFile:  filepath.Join(path, "declaration.md"),
@@ -573,6 +575,7 @@ func childTasks(taskPath string) ([]Task, error) {
 			Status:           status,
 			Path:             path,
 			MetaFile:         filepath.Join(path, "meta.json"),
+			ContextFile:      filepath.Join(path, "context.json"),
 			TaskFile:         filepath.Join(path, "task.md"),
 			InstructionsFile: filepath.Join(path, "instructions.md"),
 			DeclarationFile:  filepath.Join(path, "declaration.md"),

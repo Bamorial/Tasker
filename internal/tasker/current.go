@@ -14,6 +14,10 @@ type CurrentWorkspaceInput struct {
 }
 
 func WriteCurrentWorkspace(root string, task *Task, input CurrentWorkspaceInput) error {
+	if err := ensureTaskDiffBaseline(root, task); err != nil {
+		return err
+	}
+
 	chain, err := taskParentChain(root, task)
 	if err != nil {
 		return err

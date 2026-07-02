@@ -139,6 +139,7 @@ tui:
       show_task: ["t"]
       show_result: ["r"]
       show_status: ["s"]
+      show_diff: ["d"]
       show_agent: ["w"]
       open_output: ["o"]
       edit_doc: ["e"]

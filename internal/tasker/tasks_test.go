@@ -1329,6 +1329,91 @@ func TestDeleteCurrentTaskClearsCurrentWorkspace(t *testing.T) {
 	}
 }
 
+func TestTaskDiffUsesTaskBaselineInsteadOfRepoWideDiff(t *testing.T) {
+	root := t.TempDir()
+	if err := InitializeWorkspace(root); err != nil {
+		t.Fatalf("InitializeWorkspace: %v", err)
+	}
+	initializeGitRepo(t, root)
+
+	if err := os.WriteFile(filepath.Join(root, "shared.txt"), []byte("clean\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile shared initial: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "left-alone.txt"), []byte("stable\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile left-alone initial: %v", err)
+	}
+	runGitCommand(t, root, "add", "shared.txt", "left-alone.txt")
+	runGitCommand(t, root, "commit", "-m", "seed files")
+
+	if err := os.WriteFile(filepath.Join(root, "shared.txt"), []byte("dirty-before-task\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile shared dirty before task: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "left-alone.txt"), []byte("preexisting-change\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile left-alone dirty before task: %v", err)
+	}
+
+	created, err := CreateTask(root, CreateTaskInput{Title: "Scoped diff", Type: "feature"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if _, err := CheckoutTask(root, created.ID, CheckoutTaskInput{NoBranch: true}); err != nil {
+		t.Fatalf("CheckoutTask: %v", err)
+	}
+
+	task, err := GetTask(root, created.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "shared.txt"), []byte("task-change\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile shared task change: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "task-only.txt"), []byte("new file\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile new task file: %v", err)
+	}
+
+	repo, err := OpenGitRepo(root)
+	if err != nil {
+		t.Fatalf("OpenGitRepo: %v", err)
+	}
+
+	diffs, err := repo.TaskDiff(task)
+	if err != nil {
+		t.Fatalf("TaskDiff: %v", err)
+	}
+	if len(diffs) != 2 {
+		t.Fatalf("expected 2 task diffs, got %#v", diffs)
+	}
+
+	byPath := make(map[string]TaskFileDiff, len(diffs))
+	for _, diff := range diffs {
+		byPath[diff.Path] = diff
+	}
+
+	shared, ok := byPath["shared.txt"]
+	if !ok {
+		t.Fatalf("expected shared.txt diff, got %#v", byPath)
+	}
+	if shared.Before != "dirty-before-task\n" {
+		t.Fatalf("expected task baseline content, got %q", shared.Before)
+	}
+	if shared.After != "task-change\n" {
+		t.Fatalf("expected current content, got %q", shared.After)
+	}
+
+	taskOnly, ok := byPath["task-only.txt"]
+	if !ok {
+		t.Fatalf("expected task-only.txt diff, got %#v", byPath)
+	}
+	if taskOnly.Before != "" || taskOnly.After != "new file\n" {
+		t.Fatalf("unexpected new file diff: %#v", taskOnly)
+	}
+
+	if _, ok := byPath["left-alone.txt"]; ok {
+		t.Fatalf("expected preexisting unchanged dirty file to be excluded, got %#v", byPath["left-alone.txt"])
+	}
+}
+
 func TestTaskStatusesIncludesAllTasks(t *testing.T) {
 	root := t.TempDir()
 	if err := InitializeWorkspace(root); err != nil {
